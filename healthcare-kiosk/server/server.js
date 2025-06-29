@@ -26,6 +26,30 @@ app.get('/', (req, res) => {
   res.send('Healthcare Kiosk API is running');
 });
 
+// Function to calculate derived vital signs
+const calculateDerivedVitals = (vitals, demographics) => {
+  // Calculate BMI
+  const heightInM = demographics.height_m;
+  const weightInKg = demographics.weight_kg;
+  const bmi = weightInKg / (heightInM * heightInM);
+  
+  // Calculate Mean Arterial Pressure (MAP)
+  const map = (vitals.systolic_bp + 2 * vitals.diastolic_bp) / 3;
+  
+  // Calculate Pulse Pressure
+  const pulsePressure = vitals.systolic_bp - vitals.diastolic_bp;
+  
+  // Simple HRV estimation (this would normally require more complex calculation)
+  const hrv = Math.max(10, 50 - Math.abs(vitals.heart_rate - 70) * 0.5);
+  
+  return {
+    Derived_BMI: parseFloat(bmi.toFixed(2)),
+    Derived_MAP: parseFloat(map.toFixed(2)),
+    Derived_Pulse_Pressure: parseFloat(pulsePressure.toFixed(2)),
+    Derived_HRV: parseFloat(hrv.toFixed(2))
+  };
+};
+
 // Function to fetch the entire queue and add names
 const getRefreshedQueue = async () => {
   try {
@@ -38,9 +62,10 @@ const getRefreshedQueue = async () => {
     // The external API is the source of truth. We just add names back.
     const refreshedQueue = externalQueue.map(patient => {
       // Safety check to ensure patient.id exists
-      const patientId = patient.id || '';
+      const patientId = patient.patient_id || patient.id || '';
       return {
         ...patient,
+        id: patientId,
         name: patientNameMap.get(patientId) || `Patient ${patientId.slice(-4)}`, // Fallback to id if name not found
         patientId: patientId, // Add patientId for compatibility
         // Ensure queue_position and estimated_wait_time are available
@@ -71,7 +96,6 @@ app.post('/api/patients/vitals', async (req, res) => {
     console.log('\n🏥 === PROCESSING NEW PATIENT ===');
     const patientData = { ...req.body, patientId: uuidv4() };
     const timestamp = new Date().getTime();
-    const externalPatientId = `${patientData.name.toLowerCase().replace(/\s+/g, '_')}_${timestamp}`;
 
     console.log('👤 Patient data received:', {
       name: patientData.name,
@@ -79,47 +103,68 @@ app.post('/api/patients/vitals', async (req, res) => {
       heartRate: patientData.heartRate
     });
 
-    // Store the name for this ID
-    patientNameMap.set(externalPatientId, patientData.name);
-
-    const patientForQueueUpdate = {
-      id: externalPatientId,
-      check_in_time: new Date().toISOString(),
-      vital_signs: {
-        heart_rate: parseFloat(patientData.heartRate),
-        respiratory_rate: parseFloat(patientData.respiratoryRate),
-        body_temperature: parseFloat(patientData.bodyTemperature),
-        oxygen_saturation: parseInt(patientData.oxygenSaturation),
-        systolic_bp: parseInt(patientData.systolicBP),
-        diastolic_bp: parseInt(patientData.diastolicBP)
-      },
-      demographics: {
-        age: parseFloat(patientData.age),
-        gender: parseInt(patientData.gender),
-        weight_kg: parseFloat(patientData.weight),
-        height_m: parseFloat(patientData.height)
-      }
+    // Prepare vital signs data for external API (matching VitalSigns schema)
+    const vitalsForAPI = {
+      Heart_Rate: parseFloat(patientData.heartRate),
+      Respiratory_Rate: parseFloat(patientData.respiratoryRate),
+      Body_Temperature: parseFloat(patientData.bodyTemperature),
+      Oxygen_Saturation: parseInt(patientData.oxygenSaturation),
+      Systolic_Blood_Pressure: parseInt(patientData.systolicBP),
+      Diastolic_Blood_Pressure: parseInt(patientData.diastolicBP),
+      Age: parseFloat(patientData.age),
+      Gender: parseInt(patientData.gender),
+      Weight_kg: parseFloat(patientData.weight),
+      Height_m: parseFloat(patientData.height)
     };
 
-    console.log('📤 Sending to external API:', patientForQueueUpdate);
-    console.log('🔗 External API URL:', `${QUEUE_ASSIGNER_API}/queue/update-priorities/`);
+    // Calculate derived vitals
+    const derivedVitals = calculateDerivedVitals(
+      {
+        heart_rate: vitalsForAPI.Heart_Rate,
+        systolic_bp: vitalsForAPI.Systolic_Blood_Pressure,
+        diastolic_bp: vitalsForAPI.Diastolic_Blood_Pressure
+      },
+      {
+        height_m: vitalsForAPI.Height_m,
+        weight_kg: vitalsForAPI.Weight_kg
+      }
+    );
+
+    // Combine all data for the prediction API
+    const predictionData = {
+      ...vitalsForAPI,
+      ...derivedVitals
+    };
+
+    console.log('📤 Sending to prediction API:', predictionData);
+    console.log('🔗 Prediction API URL:', `${QUEUE_ASSIGNER_API}/predict/`);
     
-    // Add new patient and update priorities
-    await axios.post(`${QUEUE_ASSIGNER_API}/queue/update-priorities/`, [patientForQueueUpdate]);
-    console.log('✅ Patient added to external queue');
+    // Call the prediction API to add patient and get priority
+    const predictionResponse = await axios.post(`${QUEUE_ASSIGNER_API}/predict/`, predictionData);
+    const predictionResult = predictionResponse.data;
     
-    // Now, fetch the entire, updated queue from the source of truth
+    console.log('✅ Prediction API response:', predictionResult);
+    
+    // Now fetch the updated queue to get the patient's details
     const updatedQueue = await getRefreshedQueue();
     
-    const newPatientDetails = updatedQueue.find(p => p.id === externalPatientId);
+    // Find the newly added patient using timestamp (most recent)
+    const newPatientDetails = updatedQueue.find(p => {
+      const patientTime = new Date(p.check_in_time || p.timestamp).getTime();
+      return Math.abs(patientTime - timestamp) < 10000; // Within 10 seconds
+    }) || updatedQueue[updatedQueue.length - 1]; // Fallback to last patient
 
     if (!newPatientDetails) {
       throw new Error('Patient not found in updated queue');
     }
 
+    // Store the name mapping with the correct patient ID from external API
+    const externalPatientId = newPatientDetails.patient_id || newPatientDetails.id;
+    patientNameMap.set(externalPatientId, patientData.name);
+
     console.log('👤 Patient details from queue:', {
-      id: newPatientDetails.id,
-      name: newPatientDetails.name,
+      id: externalPatientId,
+      name: patientData.name,
       position: newPatientDetails.queue_position,
       risk: newPatientDetails.risk_level,
       waitTime: newPatientDetails.estimated_wait_time
@@ -127,10 +172,21 @@ app.post('/api/patients/vitals', async (req, res) => {
 
     const responseData = {
       ...patientData,
-      ...newPatientDetails, // This now contains correct position and wait time
-      priorityInfo: newPatientDetails, // For client-side compatibility
-      checkInTime: newPatientDetails.check_in_time,
-      timestamp: newPatientDetails.check_in_time
+      id: externalPatientId,
+      patientId: externalPatientId,
+      name: patientData.name,
+      queue_position: newPatientDetails.queue_position,
+      estimated_wait_time: newPatientDetails.estimated_wait_time,
+      risk_level: newPatientDetails.risk_level,
+      priority_score: newPatientDetails.priority_score,
+      priorityInfo: {
+        risk_level: newPatientDetails.risk_level,
+        priority_score: newPatientDetails.priority_score,
+        estimated_wait_time: newPatientDetails.estimated_wait_time,
+        queue_position: newPatientDetails.queue_position
+      },
+      checkInTime: newPatientDetails.check_in_time || new Date().toISOString(),
+      timestamp: newPatientDetails.check_in_time || new Date().toISOString()
     };
 
     console.log('✅ === PATIENT PROCESSING COMPLETE ===\n');
@@ -222,12 +278,13 @@ app.delete('/api/queue/next', async (req, res) => {
     console.log('👨‍⚕️ External API response:', nextPatient);
 
     // Remove the patient's name from our map if they exist
-    if (nextPatient && nextPatient.id) {
-      const patientName = patientNameMap.get(nextPatient.id);
-      patientNameMap.delete(nextPatient.id);
+    if (nextPatient && (nextPatient.patient_id || nextPatient.id)) {
+      const patientId = nextPatient.patient_id || nextPatient.id;
+      const patientName = patientNameMap.get(patientId);
+      patientNameMap.delete(patientId);
       
       console.log('👤 Called patient:', {
-        id: nextPatient.id,
+        id: patientId,
         name: patientName,
         risk: nextPatient.risk_level
       });
@@ -242,9 +299,9 @@ app.delete('/api/queue/next', async (req, res) => {
     const responseData = {
       success: true,
       nextPatient: nextPatient ? {
-        patient_id: nextPatient.id,
-        patientId: nextPatient.id,
-        name: patientNameMap.get(nextPatient.id) || `Patient ${nextPatient.id.slice(-4)}`,
+        patient_id: nextPatient.patient_id || nextPatient.id,
+        patientId: nextPatient.patient_id || nextPatient.id,
+        name: patientNameMap.get(nextPatient.patient_id || nextPatient.id) || `Patient ${(nextPatient.patient_id || nextPatient.id).slice(-4)}`,
         risk_level: nextPatient.risk_level,
         priority_score: nextPatient.priority_score,
         queue_position: 1,
@@ -252,7 +309,7 @@ app.delete('/api/queue/next', async (req, res) => {
       } : null,
       updatedQueue: updatedQueue,
       message: nextPatient ? 
-        `Called ${patientNameMap.get(nextPatient.id) || 'Patient'} (${nextPatient.risk_level} priority)` : 
+        `Called ${patientNameMap.get(nextPatient.patient_id || nextPatient.id) || 'Patient'} (${nextPatient.risk_level} priority)` : 
         'No patients in queue',
       removedCount: nextPatient ? 1 : 0
     };
@@ -313,33 +370,6 @@ app.delete('/api/queue', async (req, res) => {
   }
 });
 
-// Add regular polling to update queue priorities every 5 minutes
-setInterval(async () => {
-  try {
-    if (patientsQueue.length > 0) {
-      console.log('🔄 Periodic queue refresh...');
-      
-      // Get all patients currently in the queue
-      const patientsForUpdate = patientsQueue.map(p => ({
-        id: p.id,
-        check_in_time: p.check_in_time,
-        vital_signs: p.vital_signs,
-        demographics: p.demographics
-      }));
-      
-      // Update priorities and wait times
-      console.log('📊 Updating priorities for', patientsForUpdate.length, 'patients...');
-      await axios.post(`${QUEUE_ASSIGNER_API}/queue/update-priorities/`, patientsForUpdate);
-      
-      // Refresh queue to get updated data
-      await getRefreshedQueue();
-      console.log('✅ Periodic update complete');
-    }
-  } catch (error) {
-    console.error('❌ Error in periodic queue update:', error.message);
-  }
-}, 5 * 60 * 1000); // Every 5 minutes
-
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
   try {
@@ -372,7 +402,7 @@ app.listen(PORT, () => {
   console.log('');
   console.log('🌐 External API endpoints:');
   console.log(`   - GET  ${QUEUE_ASSIGNER_API}/queue/`);
-  console.log(`   - POST ${QUEUE_ASSIGNER_API}/queue/update-priorities/`);
+  console.log(`   - POST ${QUEUE_ASSIGNER_API}/predict/`);
   console.log(`   - DELETE ${QUEUE_ASSIGNER_API}/queue/next/`);
   console.log(`   - DELETE ${QUEUE_ASSIGNER_API}/queue/clear/`);
   console.log('');
