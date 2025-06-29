@@ -26,6 +26,7 @@ import {
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import PersonAddIcon from '@mui/icons-material/PersonAdd';
+import CallIcon from '@mui/icons-material/Call';
 import apiService from '../utils/api';
 import QueueStats from '../components/QueueStats';
 
@@ -43,6 +44,7 @@ function AdminDashboard() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [password, setPassword] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
   
   // In a real app, this would be authenticated via backend
   const adminPassword = 'admin123';
@@ -99,50 +101,76 @@ function AdminDashboard() {
     return () => clearInterval(interval);
   }, [refreshKey, authenticated]);
   
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     console.log('Admin Dashboard: Manual refresh triggered');
+    setLoading(true);
     setRefreshKey(oldKey => oldKey + 1);
   };
   
   const handleRemovePatient = async (patientId) => {
     try {
+      setActionLoading(true);
       console.log('Admin Dashboard: Removing patient:', patientId);
-      await apiService.removeFromQueue(patientId);
-      handleRefresh();
+      
+      const response = await apiService.removeFromQueue(patientId);
+      console.log('Admin Dashboard: Remove response:', response);
+      
+      // Force immediate refresh
+      await handleRefresh();
+      
     } catch (error) {
       console.error('Admin Dashboard: Error removing patient:', error);
       setError('Failed to remove patient from queue');
+    } finally {
+      setActionLoading(false);
     }
   };
   
   const handleCallNextPatient = async () => {
     try {
+      setActionLoading(true);
       console.log('Admin Dashboard: Calling next patient...');
+      
       const response = await apiService.callNextPatient();
       console.log('Admin Dashboard: Next patient response:', response);
       
-      if (response.nextPatient) {
-        alert(`Next patient: ${response.nextPatient.name || response.nextPatient.patientId}`);
-      } else {
+      if (response.success && response.nextPatient) {
+        const patientName = response.nextPatient.name || `Patient ${response.nextPatient.patientId?.slice(-4)}`;
+        alert(`Next patient called: ${patientName} (${response.nextPatient.risk_level} priority)`);
+      } else if (response.success && !response.nextPatient) {
         alert('No patients in queue');
+      } else {
+        alert('Error calling next patient');
       }
       
-      handleRefresh();
+      // Force immediate refresh to show updated queue
+      await handleRefresh();
+      
     } catch (error) {
       console.error('Admin Dashboard: Error calling next patient:', error);
       setError('Failed to call next patient');
+    } finally {
+      setActionLoading(false);
     }
   };
   
   const handleClearQueue = async () => {
     if (window.confirm('Are you sure you want to clear the entire queue?')) {
       try {
+        setActionLoading(true);
         console.log('Admin Dashboard: Clearing queue...');
-        await apiService.clearQueue();
-        handleRefresh();
+        
+        const response = await apiService.clearQueue();
+        console.log('Admin Dashboard: Clear response:', response);
+        
+        // Force immediate refresh
+        await handleRefresh();
+        
       } catch (error) {
         console.error('Admin Dashboard: Error clearing queue:', error);
         setError('Failed to clear queue');
+      } finally {
+        setActionLoading(false);
       }
     }
   };
@@ -190,7 +218,7 @@ function AdminDashboard() {
     );
   }
   
-  if (loading) {
+  if (loading && queue.length === 0) {
     return (
       <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mt: 8 }}>
         <CircularProgress size={60} />
@@ -213,14 +241,14 @@ function AdminDashboard() {
       </Box>
       
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }}>
+        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError(null)}>
           {error}
         </Alert>
       )}
       
       <Grid container spacing={4}>
         <Grid item xs={12} md={4}>
-          <QueueStats stats={queueStats} loading={false} />
+          <QueueStats stats={queueStats} loading={loading} />
           
           <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Button
@@ -229,18 +257,20 @@ function AdminDashboard() {
               startIcon={<RefreshIcon />}
               onClick={handleRefresh}
               fullWidth
+              disabled={loading}
             >
-              Refresh Queue
+              {loading ? 'Refreshing...' : 'Refresh Queue'}
             </Button>
             
             <Button
               variant="contained"
               color="success"
+              startIcon={<CallIcon />}
               onClick={handleCallNextPatient}
               fullWidth
-              disabled={queue.length === 0}
+              disabled={queue.length === 0 || actionLoading}
             >
-              Call Next Patient
+              {actionLoading ? 'Calling...' : 'Call Next Patient'}
             </Button>
             
             <Button
@@ -248,9 +278,9 @@ function AdminDashboard() {
               color="error"
               onClick={handleClearQueue}
               fullWidth
-              disabled={queue.length === 0}
+              disabled={queue.length === 0 || actionLoading}
             >
-              Clear Queue
+              {actionLoading ? 'Clearing...' : 'Clear Queue'}
             </Button>
           </Box>
           
@@ -273,6 +303,10 @@ function AdminDashboard() {
               <Typography variant="body2" color="text.secondary">
                 Current queue length: {queue.length} patients
               </Typography>
+              
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                Last updated: {new Date().toLocaleTimeString()}
+              </Typography>
             </CardContent>
           </Card>
         </Grid>
@@ -280,9 +314,14 @@ function AdminDashboard() {
         <Grid item xs={12} md={8}>
           <Card>
             <CardContent>
-              <Typography variant="h5" gutterBottom>
-                Current Queue ({queue.length} patients)
-              </Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h5">
+                  Current Queue ({queue.length} patients)
+                </Typography>
+                {loading && (
+                  <CircularProgress size={20} />
+                )}
+              </Box>
               
               {queue.length > 0 ? (
                 <TableContainer component={Paper} variant="outlined">
@@ -304,11 +343,20 @@ function AdminDashboard() {
                         const priorityScore = patient.priority_score || patient.priorityInfo?.priority_score || 0;
                         const waitTime = patient.estimated_wait_time || patient.priorityInfo?.estimated_wait_time || 0;
                         const patientId = patient.id || patient.patientId;
+                        const position = patient.queue_position || patient.queuePosition || (index + 1);
                         
                         return (
                           <TableRow key={patientId || index}>
-                            <TableCell>{patient.queue_position || patient.queuePosition || (index + 1)}</TableCell>
-                            <TableCell>{patientName}</TableCell>
+                            <TableCell>
+                              <Typography variant="h6" color="primary">
+                                #{position}
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="subtitle1">
+                                {patientName}
+                              </Typography>
+                            </TableCell>
                             <TableCell>
                               <Chip 
                                 label={riskLevel} 
@@ -316,13 +364,22 @@ function AdminDashboard() {
                                 size="small"
                               />
                             </TableCell>
-                            <TableCell>{parseFloat(priorityScore).toFixed(1)}</TableCell>
-                            <TableCell>{waitTime} min</TableCell>
+                            <TableCell>
+                              <Typography variant="body2" fontWeight="bold">
+                                {parseFloat(priorityScore).toFixed(1)}
+                              </Typography>
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="body2">
+                                {waitTime} min
+                              </Typography>
+                            </TableCell>
                             <TableCell>
                               <IconButton 
                                 aria-label="delete" 
                                 color="error"
                                 onClick={() => handleRemovePatient(patientId)}
+                                disabled={actionLoading}
                               >
                                 <DeleteIcon />
                               </IconButton>
@@ -346,18 +403,22 @@ function AdminDashboard() {
             </CardContent>
           </Card>
           
-          {/* Debug Information */}
-          <Card sx={{ mt: 2 }}>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                Debug Information
-              </Typography>
-              <Typography variant="body2" component="pre" sx={{ fontSize: '0.75rem', overflow: 'auto' }}>
-                Queue Length: {queue.length}{'\n'}
-                Queue Data: {JSON.stringify(queue, null, 2)}
-              </Typography>
-            </CardContent>
-          </Card>
+          {/* Debug Information - Only show if there are issues */}
+          {process.env.NODE_ENV === 'development' && (
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  Debug Information
+                </Typography>
+                <Typography variant="body2" component="pre" sx={{ fontSize: '0.75rem', overflow: 'auto', maxHeight: 200 }}>
+                  Queue Length: {queue.length}{'\n'}
+                  Loading: {loading.toString()}{'\n'}
+                  Action Loading: {actionLoading.toString()}{'\n'}
+                  Stats: {JSON.stringify(queueStats, null, 2)}
+                </Typography>
+              </CardContent>
+            </Card>
+          )}
         </Grid>
       </Grid>
     </Box>

@@ -42,6 +42,7 @@ function QueueStatusPage() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [lastUpdateTime, setLastUpdateTime] = useState(new Date());
   
   const fetchData = useCallback(async () => {
     try {
@@ -58,7 +59,7 @@ function QueueStatusPage() {
       const initialAssessment = JSON.parse(storedAssessment);
       console.log('Loaded assessment from session:', initialAssessment);
       
-      // Get current queue - with better error handling
+      // Get current queue
       try {
         const queueResponse = await apiService.getQueue();
         console.log("Queue response received:", queueResponse);
@@ -67,31 +68,49 @@ function QueueStatusPage() {
           setQueue(queueResponse.data);
           console.log("Queue data set:", queueResponse.data);
 
-          // Update the patient's position and wait time from the new queue data
-          const patientInQueue = queueResponse.data.find(p => 
-            p.id === initialAssessment.id || 
-            p.patientId === initialAssessment.patientId ||
-            p.id === initialAssessment.patientId
-          );
+          // Find this patient in the current queue and update their info
+          const patientInQueue = queueResponse.data.find(p => {
+            const patientId = initialAssessment.id || initialAssessment.patientId;
+            return p.id === patientId || p.patientId === patientId;
+          });
           
           if (patientInQueue) {
-            console.log('Found patient in queue:', patientInQueue);
+            console.log('Found patient in queue, updating assessment:', patientInQueue);
+            
+            // Update assessment with current queue information
             const updatedAssessment = {
               ...initialAssessment,
+              // Update queue position
               queue_position: patientInQueue.queue_position,
+              queuePosition: patientInQueue.queue_position,
+              // Update wait time
               estimated_wait_time: patientInQueue.estimated_wait_time,
-              queuePosition: patientInQueue.queue_position || patientInQueue.queuePosition,
+              // Update priority info
+              priority_score: patientInQueue.priority_score,
+              risk_level: patientInQueue.risk_level,
+              // Update priorityInfo object for compatibility
               priorityInfo: {
                 ...initialAssessment.priorityInfo,
                 estimated_wait_time: patientInQueue.estimated_wait_time,
-                queue_position: patientInQueue.queue_position
-              }
+                queue_position: patientInQueue.queue_position,
+                priority_score: patientInQueue.priority_score,
+                risk_level: patientInQueue.risk_level
+              },
+              // Update timestamp
+              lastUpdated: new Date().toISOString()
             };
+            
             setAssessment(updatedAssessment);
             sessionStorage.setItem('patientAssessment', JSON.stringify(updatedAssessment));
+            console.log('Assessment updated with current queue data');
           } else {
-            console.log('Patient not found in queue, using stored assessment');
-            setAssessment(initialAssessment);
+            console.log('Patient not found in current queue - they may have been called or removed');
+            // Keep the stored assessment but mark as potentially outdated
+            setAssessment({
+              ...initialAssessment,
+              queueStatus: 'not_found',
+              lastUpdated: new Date().toISOString()
+            });
           }
         } else {
           console.warn("Empty or invalid queue data received");
@@ -102,10 +121,10 @@ function QueueStatusPage() {
         console.error("Queue fetch failed:", queueErr);
         setQueue([]);
         setAssessment(initialAssessment);
-        setError('Unable to fetch current queue. Showing your information only.');
+        setError('Unable to fetch current queue. Showing your stored information.');
       }
       
-      // Get queue statistics with better error handling
+      // Get queue statistics
       try {
         const statsResponse = await apiService.getQueueStats();
         console.log("Stats response:", statsResponse);
@@ -124,13 +143,15 @@ function QueueStatusPage() {
         }
       }
       
+      setLastUpdateTime(new Date());
+      
     } catch (err) {
       console.error('Error in main fetchData function:', err);
       setError('There was an error retrieving the queue information. Please try refreshing.');
     } finally {
       setLoading(false);
     }
-  }, [navigate, queue.length]);
+  }, [navigate]);
   
   useEffect(() => {
     fetchData(); // Initial fetch
@@ -204,10 +225,26 @@ function QueueStatusPage() {
   
   const patientAssessment = assessment;
   
-  // Add safety check for priorityInfo before accessing risk_level
-  const riskLevel = patientAssessment?.priorityInfo?.risk_level || 
-                   patientAssessment?.risk_level || 'Unknown';
+  // Get risk level with proper fallbacks
+  const riskLevel = patientAssessment?.risk_level || 
+                   patientAssessment?.priorityInfo?.risk_level || 'Unknown';
   const riskColor = getRiskLevelColor(riskLevel);
+  
+  // Get queue position with proper fallbacks
+  const queuePosition = patientAssessment?.queue_position || 
+                       patientAssessment?.queuePosition || 
+                       (patientAssessment?.priorityInfo && patientAssessment.priorityInfo.queue_position) || 
+                       '?';
+  
+  // Get priority score with proper fallbacks
+  const priorityScore = patientAssessment?.priority_score || 
+                       (patientAssessment?.priorityInfo && patientAssessment.priorityInfo.priority_score) || 
+                       0;
+  
+  // Get estimated wait time with proper fallbacks
+  const estimatedWaitTime = patientAssessment?.estimated_wait_time ||
+                           (patientAssessment?.priorityInfo && patientAssessment.priorityInfo.estimated_wait_time) ||
+                           30; // Default fallback
   
   return (
     <Box>
@@ -247,6 +284,12 @@ function QueueStatusPage() {
         </Alert>
       )}
       
+      {patientAssessment.queueStatus === 'not_found' && (
+        <Alert severity="info" sx={{ mb: 3 }}>
+          You may have been called or your queue position has changed. Please check with staff or refresh for updates.
+        </Alert>
+      )}
+      
       <Grid container spacing={4}>
         <Grid item xs={12} lg={6}>
           <Card>
@@ -275,10 +318,7 @@ function QueueStatusPage() {
                       Queue Position
                     </Typography>
                     <Typography variant="h4" fontWeight="bold" color="primary.main">
-                      #{patientAssessment.queuePosition || 
-                         patientAssessment.queue_position || 
-                         (patientAssessment.priorityInfo && patientAssessment.priorityInfo.queue_position) || 
-                         '?'}
+                      #{queuePosition}
                     </Typography>
                   </Paper>
                 </Grid>
@@ -289,11 +329,7 @@ function QueueStatusPage() {
                       Estimated Wait Time
                     </Typography>
                     <Typography variant="h5" fontWeight="bold">
-                      {formatQueueTime(
-                        patientAssessment.estimated_wait_time ||
-                        (patientAssessment.priorityInfo && patientAssessment.priorityInfo.estimated_wait_time) ||
-                        30 // Default fallback
-                      )}
+                      {formatQueueTime(estimatedWaitTime)}
                     </Typography>
                   </Paper>
                 </Grid>
@@ -313,14 +349,19 @@ function QueueStatusPage() {
                   <ListItem>
                     <ListItemText 
                       primary="Priority Score" 
-                      secondary={(patientAssessment.priorityInfo?.priority_score || 
-                                 patientAssessment.priority_score || 0).toFixed(2)} 
+                      secondary={parseFloat(priorityScore).toFixed(2)} 
                     />
                   </ListItem>
                   <ListItem>
                     <ListItemText 
                       primary="Check-in Time" 
                       secondary={moment(patientAssessment.checkInTime || patientAssessment.check_in_time || new Date()).format('MMM D, YYYY hh:mm A')} 
+                    />
+                  </ListItem>
+                  <ListItem>
+                    <ListItemText 
+                      primary="Last Updated" 
+                      secondary={moment(lastUpdateTime).format('hh:mm:ss A')} 
                     />
                   </ListItem>
                 </List>
@@ -404,7 +445,7 @@ function QueueStatusPage() {
       
       <Alert severity="info" sx={{ mt: 4 }}>
         The queue priority is dynamically updated based on patient risk levels, wait times, and available resources.
-        High priority patients may be seen sooner than their estimated wait times.
+        High priority patients may be seen sooner than their estimated wait times. Last updated: {moment(lastUpdateTime).format('hh:mm:ss A')}
       </Alert>
     </Box>
   );
