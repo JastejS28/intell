@@ -65,16 +65,27 @@ function AdminDashboard() {
         setLoading(true);
         setError(null);
         
+        console.log('Admin Dashboard: Fetching queue data...');
+        
         // Get current queue
         const queueResponse = await apiService.getQueue();
-        setQueue(queueResponse.data || []);
+        console.log('Admin Dashboard: Queue response:', queueResponse);
+        
+        if (queueResponse && queueResponse.data) {
+          setQueue(queueResponse.data);
+          console.log('Admin Dashboard: Queue set to:', queueResponse.data);
+        } else {
+          console.warn('Admin Dashboard: No queue data received');
+          setQueue([]);
+        }
         
         // Get queue statistics
         const statsResponse = await apiService.getQueueStats();
+        console.log('Admin Dashboard: Stats response:', statsResponse);
         setQueueStats(statsResponse);
         
       } catch (err) {
-        console.error('Error fetching queue data:', err);
+        console.error('Admin Dashboard: Error fetching queue data:', err);
         setError('There was an error retrieving the queue information.');
       } finally {
         setLoading(false);
@@ -82,29 +93,55 @@ function AdminDashboard() {
     };
     
     fetchData();
+    
+    // Set up auto-refresh every 5 seconds
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
   }, [refreshKey, authenticated]);
   
   const handleRefresh = () => {
+    console.log('Admin Dashboard: Manual refresh triggered');
     setRefreshKey(oldKey => oldKey + 1);
   };
   
   const handleRemovePatient = async (patientId) => {
     try {
+      console.log('Admin Dashboard: Removing patient:', patientId);
       await apiService.removeFromQueue(patientId);
       handleRefresh();
     } catch (error) {
-      console.error('Error removing patient:', error);
+      console.error('Admin Dashboard: Error removing patient:', error);
       setError('Failed to remove patient from queue');
+    }
+  };
+  
+  const handleCallNextPatient = async () => {
+    try {
+      console.log('Admin Dashboard: Calling next patient...');
+      const response = await apiService.callNextPatient();
+      console.log('Admin Dashboard: Next patient response:', response);
+      
+      if (response.nextPatient) {
+        alert(`Next patient: ${response.nextPatient.name || response.nextPatient.patientId}`);
+      } else {
+        alert('No patients in queue');
+      }
+      
+      handleRefresh();
+    } catch (error) {
+      console.error('Admin Dashboard: Error calling next patient:', error);
+      setError('Failed to call next patient');
     }
   };
   
   const handleClearQueue = async () => {
     if (window.confirm('Are you sure you want to clear the entire queue?')) {
       try {
+        console.log('Admin Dashboard: Clearing queue...');
         await apiService.clearQueue();
         handleRefresh();
       } catch (error) {
-        console.error('Error clearing queue:', error);
+        console.error('Admin Dashboard: Error clearing queue:', error);
         setError('Failed to clear queue');
       }
     }
@@ -121,12 +158,11 @@ function AdminDashboard() {
   };
   
   const getRiskLevelColor = (riskLevel) => {
-    switch (riskLevel.toLowerCase()) {
-      case 'high': return 'error';
-      case 'medium': return 'warning';
-      case 'low': return 'success';
-      default: return 'primary';
-    }
+    const level = (riskLevel || '').toLowerCase();
+    if (level.includes('high')) return 'error';
+    if (level.includes('medium')) return 'warning';
+    if (level.includes('low')) return 'success';
+    return 'primary';
   };
   
   if (!authenticated) {
@@ -186,20 +222,33 @@ function AdminDashboard() {
         <Grid item xs={12} md={4}>
           <QueueStats stats={queueStats} loading={false} />
           
-          <Box sx={{ mt: 3, display: 'flex', justifyContent: 'space-between' }}>
+          <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Button
               variant="contained"
               color="primary"
               startIcon={<RefreshIcon />}
               onClick={handleRefresh}
+              fullWidth
             >
-              Refresh
+              Refresh Queue
+            </Button>
+            
+            <Button
+              variant="contained"
+              color="success"
+              onClick={handleCallNextPatient}
+              fullWidth
+              disabled={queue.length === 0}
+            >
+              Call Next Patient
             </Button>
             
             <Button
               variant="outlined"
               color="error"
               onClick={handleClearQueue}
+              fullWidth
+              disabled={queue.length === 0}
             >
               Clear Queue
             </Button>
@@ -220,6 +269,10 @@ function AdminDashboard() {
               >
                 Add Test Patient
               </Button>
+              
+              <Typography variant="body2" color="text.secondary">
+                Current queue length: {queue.length} patients
+              </Typography>
             </CardContent>
           </Card>
         </Grid>
@@ -228,57 +281,81 @@ function AdminDashboard() {
           <Card>
             <CardContent>
               <Typography variant="h5" gutterBottom>
-                Current Queue
+                Current Queue ({queue.length} patients)
               </Typography>
               
-              <TableContainer component={Paper} variant="outlined">
-                <Table>
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Position</TableCell>
-                      <TableCell>Patient</TableCell>
-                      <TableCell>Risk Level</TableCell>
-                      <TableCell>Priority</TableCell>
-                      <TableCell>Wait Time</TableCell>
-                      <TableCell>Actions</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {queue.length > 0 ? (
-                      queue.map((patient) => (
-                        <TableRow key={patient.patientId}>
-                          <TableCell>{patient.queuePosition}</TableCell>
-                          <TableCell>{patient.name || `Patient #${patient.patientId.slice(-4)}`}</TableCell>
-                          <TableCell>
-                            <Chip 
-                              label={patient.priorityInfo.risk_level} 
-                              color={getRiskLevelColor(patient.priorityInfo.risk_level)}
-                              size="small"
-                            />
-                          </TableCell>
-                          <TableCell>{patient.priorityInfo.priority_score.toFixed(1)}</TableCell>
-                          <TableCell>{patient.priorityInfo.estimated_wait_time} min</TableCell>
-                          <TableCell>
-                            <IconButton 
-                              aria-label="delete" 
-                              color="error"
-                              onClick={() => handleRemovePatient(patient.patientId)}
-                            >
-                              <DeleteIcon />
-                            </IconButton>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
+              {queue.length > 0 ? (
+                <TableContainer component={Paper} variant="outlined">
+                  <Table>
+                    <TableHead>
                       <TableRow>
-                        <TableCell colSpan={6} align="center">
-                          No patients in queue
-                        </TableCell>
+                        <TableCell>Position</TableCell>
+                        <TableCell>Patient</TableCell>
+                        <TableCell>Risk Level</TableCell>
+                        <TableCell>Priority</TableCell>
+                        <TableCell>Wait Time</TableCell>
+                        <TableCell>Actions</TableCell>
                       </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
+                    </TableHead>
+                    <TableBody>
+                      {queue.map((patient, index) => {
+                        const patientName = patient.name || `Patient #${(patient.id || patient.patientId || '').slice(-4)}`;
+                        const riskLevel = patient.risk_level || patient.priorityInfo?.risk_level || 'Unknown';
+                        const priorityScore = patient.priority_score || patient.priorityInfo?.priority_score || 0;
+                        const waitTime = patient.estimated_wait_time || patient.priorityInfo?.estimated_wait_time || 0;
+                        const patientId = patient.id || patient.patientId;
+                        
+                        return (
+                          <TableRow key={patientId || index}>
+                            <TableCell>{patient.queue_position || patient.queuePosition || (index + 1)}</TableCell>
+                            <TableCell>{patientName}</TableCell>
+                            <TableCell>
+                              <Chip 
+                                label={riskLevel} 
+                                color={getRiskLevelColor(riskLevel)}
+                                size="small"
+                              />
+                            </TableCell>
+                            <TableCell>{parseFloat(priorityScore).toFixed(1)}</TableCell>
+                            <TableCell>{waitTime} min</TableCell>
+                            <TableCell>
+                              <IconButton 
+                                aria-label="delete" 
+                                color="error"
+                                onClick={() => handleRemovePatient(patientId)}
+                              >
+                                <DeleteIcon />
+                              </IconButton>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              ) : (
+                <Box sx={{ textAlign: 'center', py: 4 }}>
+                  <Typography variant="h6" color="text.secondary">
+                    No patients in queue
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    Patients will appear here after completing the check-in process
+                  </Typography>
+                </Box>
+              )}
+            </CardContent>
+          </Card>
+          
+          {/* Debug Information */}
+          <Card sx={{ mt: 2 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Debug Information
+              </Typography>
+              <Typography variant="body2" component="pre" sx={{ fontSize: '0.75rem', overflow: 'auto' }}>
+                Queue Length: {queue.length}{'\n'}
+                Queue Data: {JSON.stringify(queue, null, 2)}
+              </Typography>
             </CardContent>
           </Card>
         </Grid>
