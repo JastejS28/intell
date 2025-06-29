@@ -136,7 +136,7 @@ function sortAndUpdateQueue() {
     }
   });
   
-  console.log('Queue sorted and updated. Current order:', patientsQueue.map(p => ({
+  console.log('✅ Queue sorted and updated. Current order:', patientsQueue.map(p => ({
     name: p.name,
     position: p.queue_position,
     risk: p.risk_level,
@@ -149,15 +149,16 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Healthcare Kiosk API is running',
     timestamp: new Date().toISOString(),
-    queueLength: patientsQueue.length
+    queueLength: patientsQueue.length,
+    status: 'healthy'
   });
 });
 
 // Submit patient vitals and get priority
 app.post('/api/patients/vitals', (req, res) => {
   try {
-    console.log('\n=== PROCESSING NEW PATIENT ===');
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    console.log('\n🏥 === PROCESSING NEW PATIENT ===');
+    console.log('📝 Request body:', JSON.stringify(req.body, null, 2));
     
     const patientData = req.body;
     const timestamp = new Date();
@@ -167,7 +168,7 @@ app.post('/api/patients/vitals', (req, res) => {
     const { riskLevel, riskScore } = calculateRiskLevel(patientData);
     const priorityScore = calculatePriorityScore(riskLevel, riskScore, patientData.age);
     
-    console.log('Risk Assessment:', { riskLevel, riskScore, priorityScore });
+    console.log('🔍 Risk Assessment:', { riskLevel, riskScore, priorityScore });
     
     // Create comprehensive patient object
     const newPatient = {
@@ -218,7 +219,7 @@ app.post('/api/patients/vitals', (req, res) => {
       }
     };
     
-    console.log('Created patient object:', {
+    console.log('👤 Created patient object:', {
       id: newPatient.id,
       name: newPatient.name,
       risk: newPatient.risk_level,
@@ -227,7 +228,7 @@ app.post('/api/patients/vitals', (req, res) => {
     
     // Add to queue
     patientsQueue.push(newPatient);
-    console.log(`Added to queue. Total patients: ${patientsQueue.length}`);
+    console.log(`📋 Added to queue. Total patients: ${patientsQueue.length}`);
     
     // Sort and update queue
     sortAndUpdateQueue();
@@ -239,8 +240,8 @@ app.post('/api/patients/vitals', (req, res) => {
       throw new Error('Patient not found after adding to queue');
     }
     
-    console.log('Patient successfully added at position:', addedPatient.queue_position);
-    console.log('=== PATIENT PROCESSING COMPLETE ===\n');
+    console.log('✅ Patient successfully added at position:', addedPatient.queue_position);
+    console.log('🏥 === PATIENT PROCESSING COMPLETE ===\n');
     
     // Return the patient data
     res.status(200).json({
@@ -250,7 +251,7 @@ app.post('/api/patients/vitals', (req, res) => {
     });
     
   } catch (error) {
-    console.error('=== ERROR PROCESSING PATIENT ===');
+    console.error('❌ === ERROR PROCESSING PATIENT ===');
     console.error('Error:', error.message);
     console.error('Stack:', error.stack);
     
@@ -265,11 +266,11 @@ app.post('/api/patients/vitals', (req, res) => {
 // Get all patients in the queue
 app.get('/api/queue', (req, res) => {
   try {
-    console.log('\n=== QUEUE REQUEST ===');
+    console.log('\n📋 === QUEUE REQUEST ===');
     console.log(`Current queue length: ${patientsQueue.length}`);
     
     if (patientsQueue.length === 0) {
-      console.log('Queue is empty');
+      console.log('📭 Queue is empty');
       return res.status(200).json({
         success: true,
         count: 0,
@@ -280,7 +281,7 @@ app.get('/api/queue', (req, res) => {
     // Ensure queue is properly sorted
     sortAndUpdateQueue();
     
-    console.log('Returning queue data for patients:', patientsQueue.map(p => ({
+    console.log('📤 Returning queue data for patients:', patientsQueue.map(p => ({
       id: p.id,
       name: p.name,
       position: p.queue_position,
@@ -295,7 +296,7 @@ app.get('/api/queue', (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error getting queue:', error.message);
+    console.error('❌ Error getting queue:', error.message);
     res.status(500).json({
       success: false,
       count: 0,
@@ -309,12 +310,12 @@ app.get('/api/queue', (req, res) => {
 app.delete('/api/queue/:patientId', (req, res) => {
   try {
     const { patientId } = req.params;
-    console.log(`\n=== REMOVING PATIENT ${patientId} ===`);
+    console.log(`\n🗑️ === REMOVING PATIENT ${patientId} ===`);
     
     const initialLength = patientsQueue.length;
     patientsQueue = patientsQueue.filter(p => p.id !== patientId && p.patientId !== patientId);
     
-    console.log(`Removed from queue. Before: ${initialLength}, After: ${patientsQueue.length}`);
+    console.log(`📊 Removed from queue. Before: ${initialLength}, After: ${patientsQueue.length}`);
     
     // Sort and update remaining queue
     if (patientsQueue.length > 0) {
@@ -329,7 +330,7 @@ app.delete('/api/queue/:patientId', (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error removing patient:', error.message);
+    console.error('❌ Error removing patient:', error.message);
     res.status(500).json({
       success: false,
       message: 'Error removing patient from queue'
@@ -337,14 +338,14 @@ app.delete('/api/queue/:patientId', (req, res) => {
   }
 });
 
-// Call next patient (remove highest priority patient) - FIXED VERSION
+// Call next patient (remove highest priority patient) - LOCAL VERSION ONLY
 app.delete('/api/queue/next', (req, res) => {
   try {
-    console.log('\n=== CALLING NEXT PATIENT ===');
-    console.log(`Current queue length: ${patientsQueue.length}`);
+    console.log('\n📞 === CALLING NEXT PATIENT (LOCAL) ===');
+    console.log(`📊 Current queue length: ${patientsQueue.length}`);
     
     if (patientsQueue.length === 0) {
-      console.log('No patients in queue');
+      console.log('📭 No patients in queue');
       return res.status(200).json({
         success: true,
         message: 'No patients in queue',
@@ -359,7 +360,7 @@ app.delete('/api/queue/next', (req, res) => {
     // Remove the first (highest priority) patient
     const nextPatient = patientsQueue.shift();
     
-    console.log('Next patient called:', {
+    console.log('👨‍⚕️ Next patient called:', {
       id: nextPatient.id,
       name: nextPatient.name,
       risk: nextPatient.risk_level,
@@ -372,8 +373,8 @@ app.delete('/api/queue/next', (req, res) => {
       sortAndUpdateQueue();
     }
     
-    console.log(`Queue updated. Remaining patients: ${patientsQueue.length}`);
-    console.log('Updated queue:', patientsQueue.map(p => ({
+    console.log(`📋 Queue updated. Remaining patients: ${patientsQueue.length}`);
+    console.log('📊 Updated queue:', patientsQueue.map(p => ({
       name: p.name,
       position: p.queue_position,
       risk: p.risk_level
@@ -396,7 +397,7 @@ app.delete('/api/queue/next', (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error calling next patient:', error.message);
+    console.error('❌ Error calling next patient:', error.message);
     console.error('Stack trace:', error.stack);
     res.status(500).json({
       success: false,
@@ -409,13 +410,13 @@ app.delete('/api/queue/next', (req, res) => {
 // Clear entire queue
 app.delete('/api/queue', (req, res) => {
   try {
-    console.log('\n=== CLEARING QUEUE ===');
+    console.log('\n🧹 === CLEARING QUEUE ===');
     
     const patientCount = patientsQueue.length;
     patientsQueue = [];
     patientCounter = 1; // Reset counter
     
-    console.log(`Cleared ${patientCount} patients from queue`);
+    console.log(`✅ Cleared ${patientCount} patients from queue`);
     
     res.status(200).json({
       success: true,
@@ -424,7 +425,7 @@ app.delete('/api/queue', (req, res) => {
     });
     
   } catch (error) {
-    console.error('Error clearing queue:', error.message);
+    console.error('❌ Error clearing queue:', error.message);
     res.status(500).json({
       success: false,
       message: 'Error clearing queue'
@@ -452,19 +453,23 @@ app.get('/api/debug/queue', (req, res) => {
   res.status(200).json({
     queueLength: patientsQueue.length,
     patientCounter: patientCounter,
-    rawQueue: patientsQueue
+    rawQueue: patientsQueue,
+    timestamp: new Date().toISOString()
   });
 });
 
 // Start the server
 app.listen(PORT, () => {
   console.log(`🚀 Healthcare Kiosk Server running on port ${PORT}`);
-  console.log('📋 Queue management system initialized');
+  console.log('📋 Queue management system initialized (LOCAL MODE)');
   console.log('🔗 API endpoints available:');
   console.log(`   - GET  http://localhost:${PORT}/api/queue`);
   console.log(`   - POST http://localhost:${PORT}/api/patients/vitals`);
   console.log(`   - DELETE http://localhost:${PORT}/api/queue/next`);
   console.log(`   - GET  http://localhost:${PORT}/api/health`);
   console.log(`   - GET  http://localhost:${PORT}/api/debug/queue`);
+  console.log('');
+  console.log('🚨 IMPORTANT: This server does NOT use external APIs');
+  console.log('🏠 All queue management is handled locally');
   console.log('');
 });
