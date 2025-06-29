@@ -21,7 +21,8 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  TextField
+  TextField,
+  Snackbar
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -45,6 +46,7 @@ function AdminDashboard() {
   const [password, setPassword] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
   
   // In a real app, this would be authenticated via backend
   const adminPassword = 'admin123';
@@ -96,14 +98,13 @@ function AdminDashboard() {
     
     fetchData();
     
-    // Set up auto-refresh every 5 seconds
-    const interval = setInterval(fetchData, 5000);
+    // Set up auto-refresh every 10 seconds
+    const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
   }, [refreshKey, authenticated]);
   
   const handleRefresh = async () => {
     console.log('Admin Dashboard: Manual refresh triggered');
-    setLoading(true);
     setRefreshKey(oldKey => oldKey + 1);
   };
   
@@ -114,6 +115,8 @@ function AdminDashboard() {
       
       const response = await apiService.removeFromQueue(patientId);
       console.log('Admin Dashboard: Remove response:', response);
+      
+      setSuccessMessage('Patient removed from queue successfully');
       
       // Force immediate refresh
       await handleRefresh();
@@ -129,26 +132,30 @@ function AdminDashboard() {
   const handleCallNextPatient = async () => {
     try {
       setActionLoading(true);
+      setError(null);
       console.log('Admin Dashboard: Calling next patient...');
       
       const response = await apiService.callNextPatient();
       console.log('Admin Dashboard: Next patient response:', response);
       
-      if (response.success && response.nextPatient) {
-        const patientName = response.nextPatient.name || `Patient ${response.nextPatient.patientId?.slice(-4)}`;
-        alert(`Next patient called: ${patientName} (${response.nextPatient.risk_level} priority)`);
-      } else if (response.success && !response.nextPatient) {
-        alert('No patients in queue');
+      if (response && response.success) {
+        if (response.nextPatient) {
+          const patientName = response.nextPatient.name || `Patient ${(response.nextPatient.patientId || response.nextPatient.patient_id || '').slice(-4)}`;
+          const riskLevel = response.nextPatient.risk_level || 'Unknown';
+          setSuccessMessage(`✅ Called: ${patientName} (${riskLevel} priority)`);
+        } else {
+          setSuccessMessage('ℹ️ No patients in queue');
+        }
+        
+        // Force immediate refresh to show updated queue
+        await handleRefresh();
       } else {
-        alert('Error calling next patient');
+        setError('Failed to call next patient - invalid response');
       }
-      
-      // Force immediate refresh to show updated queue
-      await handleRefresh();
       
     } catch (error) {
       console.error('Admin Dashboard: Error calling next patient:', error);
-      setError('Failed to call next patient');
+      setError(`Failed to call next patient: ${error.message}`);
     } finally {
       setActionLoading(false);
     }
@@ -162,6 +169,8 @@ function AdminDashboard() {
         
         const response = await apiService.clearQueue();
         console.log('Admin Dashboard: Clear response:', response);
+        
+        setSuccessMessage(`Cleared ${response.clearedCount || 0} patients from queue`);
         
         // Force immediate refresh
         await handleRefresh();
@@ -246,6 +255,13 @@ function AdminDashboard() {
         </Alert>
       )}
       
+      <Snackbar
+        open={!!successMessage}
+        autoHideDuration={4000}
+        onClose={() => setSuccessMessage('')}
+        message={successMessage}
+      />
+      
       <Grid container spacing={4}>
         <Grid item xs={12} md={4}>
           <QueueStats stats={queueStats} loading={loading} />
@@ -269,8 +285,16 @@ function AdminDashboard() {
               onClick={handleCallNextPatient}
               fullWidth
               disabled={queue.length === 0 || actionLoading}
+              size="large"
             >
-              {actionLoading ? 'Calling...' : 'Call Next Patient'}
+              {actionLoading ? (
+                <>
+                  <CircularProgress size={20} sx={{ mr: 1 }} />
+                  Calling...
+                </>
+              ) : (
+                'Call Next Patient'
+              )}
             </Button>
             
             <Button
@@ -328,12 +352,12 @@ function AdminDashboard() {
                   <Table>
                     <TableHead>
                       <TableRow>
-                        <TableCell>Position</TableCell>
-                        <TableCell>Patient</TableCell>
-                        <TableCell>Risk Level</TableCell>
-                        <TableCell>Priority</TableCell>
-                        <TableCell>Wait Time</TableCell>
-                        <TableCell>Actions</TableCell>
+                        <TableCell><strong>Position</strong></TableCell>
+                        <TableCell><strong>Patient</strong></TableCell>
+                        <TableCell><strong>Risk Level</strong></TableCell>
+                        <TableCell><strong>Priority</strong></TableCell>
+                        <TableCell><strong>Wait Time</strong></TableCell>
+                        <TableCell><strong>Actions</strong></TableCell>
                       </TableRow>
                     </TableHead>
                     <TableBody>
@@ -346,14 +370,25 @@ function AdminDashboard() {
                         const position = patient.queue_position || patient.queuePosition || (index + 1);
                         
                         return (
-                          <TableRow key={patientId || index}>
+                          <TableRow 
+                            key={patientId || index}
+                            sx={{ 
+                              backgroundColor: position === 1 ? 'action.hover' : 'inherit',
+                              '&:hover': { backgroundColor: 'action.selected' }
+                            }}
+                          >
                             <TableCell>
-                              <Typography variant="h6" color="primary">
+                              <Typography 
+                                variant="h6" 
+                                color={position === 1 ? 'success.main' : 'primary.main'}
+                                fontWeight="bold"
+                              >
                                 #{position}
+                                {position === 1 && ' 👑'}
                               </Typography>
                             </TableCell>
                             <TableCell>
-                              <Typography variant="subtitle1">
+                              <Typography variant="subtitle1" fontWeight={position === 1 ? 'bold' : 'normal'}>
                                 {patientName}
                               </Typography>
                             </TableCell>
@@ -362,6 +397,7 @@ function AdminDashboard() {
                                 label={riskLevel} 
                                 color={getRiskLevelColor(riskLevel)}
                                 size="small"
+                                variant={position === 1 ? 'filled' : 'outlined'}
                               />
                             </TableCell>
                             <TableCell>
@@ -380,6 +416,7 @@ function AdminDashboard() {
                                 color="error"
                                 onClick={() => handleRemovePatient(patientId)}
                                 disabled={actionLoading}
+                                size="small"
                               >
                                 <DeleteIcon />
                               </IconButton>
@@ -402,23 +439,6 @@ function AdminDashboard() {
               )}
             </CardContent>
           </Card>
-          
-          {/* Debug Information - Only show if there are issues */}
-          {process.env.NODE_ENV === 'development' && (
-            <Card sx={{ mt: 2 }}>
-              <CardContent>
-                <Typography variant="h6" gutterBottom>
-                  Debug Information
-                </Typography>
-                <Typography variant="body2" component="pre" sx={{ fontSize: '0.75rem', overflow: 'auto', maxHeight: 200 }}>
-                  Queue Length: {queue.length}{'\n'}
-                  Loading: {loading.toString()}{'\n'}
-                  Action Loading: {actionLoading.toString()}{'\n'}
-                  Stats: {JSON.stringify(queueStats, null, 2)}
-                </Typography>
-              </CardContent>
-            </Card>
-          )}
         </Grid>
       </Grid>
     </Box>
