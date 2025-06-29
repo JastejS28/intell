@@ -1,0 +1,60 @@
+body {
+  margin: 0;
+  font-family: 'Roboto', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f5f5f5;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Fullscreen kiosk style */
+.kiosk-fullscreen {
+  min-height: 100vh;
+  max-height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Utility classes */
+.text-center {
+  text-align: center;
+}
+
+.mb-2 {
+  margin-bottom: 16px;
+}
+
+.mb-4 {
+  margin-bottom: 32px;
+}
+
+.mt-2 {
+  margin-top: 16px;
+}
+
+.mt-4 {
+  margin-top: 32px;
+}
