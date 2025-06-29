@@ -23,6 +23,7 @@ import { useNavigate } from 'react-router-dom';
 import PeopleAltIcon from '@mui/icons-material/PeopleAlt';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import PriorityHighIcon from '@mui/icons-material/PriorityHigh';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import QueueStats from '../components/QueueStats';
 import PatientQueueItem from '../components/PatientQueueItem';
 import apiService from '../utils/api';
@@ -44,41 +45,56 @@ function QueueStatusPage() {
   
   const fetchData = useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
       
       // Get patient assessment from session storage
       const storedAssessment = sessionStorage.getItem('patientAssessment');
       if (!storedAssessment) {
+        console.warn('No patient assessment found in session storage');
         navigate('/vital-signs');
         return;
       }
       
       const initialAssessment = JSON.parse(storedAssessment);
+      console.log('Loaded assessment from session:', initialAssessment);
       
       // Get current queue - with better error handling
       try {
         const queueResponse = await apiService.getQueue();
+        console.log("Queue response received:", queueResponse);
+        
         if (queueResponse && queueResponse.data) {
           setQueue(queueResponse.data);
-          console.log("Queue data received:", queueResponse.data);
+          console.log("Queue data set:", queueResponse.data);
 
           // Update the patient's position and wait time from the new queue data
-          const patientInQueue = queueResponse.data.find(p => p.id === initialAssessment.id);
+          const patientInQueue = queueResponse.data.find(p => 
+            p.id === initialAssessment.id || 
+            p.patientId === initialAssessment.patientId ||
+            p.id === initialAssessment.patientId
+          );
+          
           if (patientInQueue) {
+            console.log('Found patient in queue:', patientInQueue);
             const updatedAssessment = {
               ...initialAssessment,
               queue_position: patientInQueue.queue_position,
               estimated_wait_time: patientInQueue.estimated_wait_time,
+              queuePosition: patientInQueue.queue_position || patientInQueue.queuePosition,
+              priorityInfo: {
+                ...initialAssessment.priorityInfo,
+                estimated_wait_time: patientInQueue.estimated_wait_time,
+                queue_position: patientInQueue.queue_position
+              }
             };
             setAssessment(updatedAssessment);
             sessionStorage.setItem('patientAssessment', JSON.stringify(updatedAssessment));
           } else {
-              setAssessment(initialAssessment);
+            console.log('Patient not found in queue, using stored assessment');
+            setAssessment(initialAssessment);
           }
-
         } else {
-          console.warn("Empty queue data received");
+          console.warn("Empty or invalid queue data received");
           setQueue([]);
           setAssessment(initialAssessment);
         }
@@ -86,27 +102,39 @@ function QueueStatusPage() {
         console.error("Queue fetch failed:", queueErr);
         setQueue([]);
         setAssessment(initialAssessment);
+        setError('Unable to fetch current queue. Showing your information only.');
       }
       
       // Get queue statistics with better error handling
       try {
         const statsResponse = await apiService.getQueueStats();
+        console.log("Stats response:", statsResponse);
         setQueueStats(statsResponse);
       } catch (statsErr) {
         console.error("Stats fetch failed:", statsErr);
+        // Calculate basic stats from current queue if available
+        if (queue.length > 0) {
+          const basicStats = {
+            totalPatients: queue.length,
+            highPriority: queue.filter(p => (p.risk_level || '').toLowerCase().includes('high')).length,
+            mediumPriority: queue.filter(p => (p.risk_level || '').toLowerCase().includes('medium')).length,
+            lowPriority: queue.filter(p => (p.risk_level || '').toLowerCase().includes('low')).length
+          };
+          setQueueStats(basicStats);
+        }
       }
       
     } catch (err) {
       console.error('Error in main fetchData function:', err);
-      setError('There was an error retrieving the queue information. Please try again.');
+      setError('There was an error retrieving the queue information. Please try refreshing.');
     } finally {
       setLoading(false);
     }
-  }, [navigate]);
+  }, [navigate, queue.length]);
   
   useEffect(() => {
     fetchData(); // Initial fetch
-    const interval = setInterval(fetchData, 5000); // Poll every 5 seconds
+    const interval = setInterval(fetchData, 10000); // Poll every 10 seconds
 
     return () => clearInterval(interval); // Cleanup on unmount
   }, [fetchData]);
@@ -120,18 +148,16 @@ function QueueStatusPage() {
   };
   
   const getRiskLevelColor = (riskLevel) => {
-    switch (riskLevel.toLowerCase()) {
-      case 'high': return 'error';
-      case 'medium': return 'warning';
-      case 'low': return 'success';
-      default: return 'primary';
-    }
+    const level = (riskLevel || '').toLowerCase();
+    if (level.includes('high')) return 'error';
+    if (level.includes('medium')) return 'warning';
+    if (level.includes('low')) return 'success';
+    return 'primary';
   };
   
-  // Update the formatQueueTime function to avoid hardcoded fallbacks
   const formatQueueTime = (minutes) => {
     if (!minutes || isNaN(minutes)) {
-      return "Calculating..."; // Better to show this than a hardcoded time
+      return "Calculating...";
     }
     
     minutes = parseInt(minutes);
@@ -145,21 +171,6 @@ function QueueStatusPage() {
       const mins = minutes % 60;
       return `${hours} hour${hours > 1 ? 's' : ''}${mins > 0 ? ` ${mins} min` : ''}`;
     }
-  };
-  
-  // Helper function to update patient data with fresh queue data
-  const updatePatientFromQueue = (patientData, queueData) => {
-    if (!queueData || queueData.length === 0 || !patientData) return patientData;
-    
-    // Find this patient in the queue
-    const matchingPatient = queueData.find(p => p.patientId === patientData.patientId);
-    
-    if (matchingPatient) {
-      console.log('Found matching patient in queue, updating assessment data');
-      return matchingPatient;
-    }
-    
-    return patientData;
   };
   
   if (loading) {
@@ -194,7 +205,8 @@ function QueueStatusPage() {
   const patientAssessment = assessment;
   
   // Add safety check for priorityInfo before accessing risk_level
-  const riskLevel = patientAssessment?.priorityInfo?.risk_level || 'Unknown';
+  const riskLevel = patientAssessment?.priorityInfo?.risk_level || 
+                   patientAssessment?.risk_level || 'Unknown';
   const riskColor = getRiskLevelColor(riskLevel);
   
   return (
@@ -222,8 +234,16 @@ function QueueStatusPage() {
       </Stepper>
       
       {error && (
-        <Alert severity="error" sx={{ mb: 3 }}>
+        <Alert severity="warning" sx={{ mb: 3 }}>
           {error}
+          <Button 
+            startIcon={<RefreshIcon />} 
+            onClick={handleRefresh}
+            sx={{ ml: 2 }}
+            size="small"
+          >
+            Retry
+          </Button>
         </Alert>
       )}
       
@@ -237,7 +257,7 @@ function QueueStatusPage() {
               
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                 <Typography variant="subtitle1">
-                  Patient: {patientAssessment.name}
+                  Patient: {patientAssessment.name || 'Unknown'}
                 </Typography>
                 <Chip
                   icon={<PriorityHighIcon />}
@@ -255,7 +275,10 @@ function QueueStatusPage() {
                       Queue Position
                     </Typography>
                     <Typography variant="h4" fontWeight="bold" color="primary.main">
-                      #{patientAssessment.queuePosition || (patientAssessment.priorityInfo && patientAssessment.priorityInfo.queue_position) || 1}
+                      #{patientAssessment.queuePosition || 
+                         patientAssessment.queue_position || 
+                         (patientAssessment.priorityInfo && patientAssessment.priorityInfo.queue_position) || 
+                         '?'}
                     </Typography>
                   </Paper>
                 </Grid>
@@ -267,13 +290,9 @@ function QueueStatusPage() {
                     </Typography>
                     <Typography variant="h5" fontWeight="bold">
                       {formatQueueTime(
-                        patientAssessment.priorityInfo && typeof patientAssessment.priorityInfo.estimated_wait_time !== 'undefined' 
-                          ? patientAssessment.priorityInfo.estimated_wait_time 
-                          : patientAssessment.priorityInfo && patientAssessment.priorityInfo.risk_level === 'Low' 
-                            ? 60 
-                            : patientAssessment.priorityInfo && patientAssessment.priorityInfo.risk_level === 'Medium' 
-                              ? 30 
-                              : 15
+                        patientAssessment.estimated_wait_time ||
+                        (patientAssessment.priorityInfo && patientAssessment.priorityInfo.estimated_wait_time) ||
+                        30 // Default fallback
                       )}
                     </Typography>
                   </Paper>
@@ -294,13 +313,14 @@ function QueueStatusPage() {
                   <ListItem>
                     <ListItemText 
                       primary="Priority Score" 
-                      secondary={(patientAssessment.priorityInfo?.priority_score || 0).toFixed(2)} 
+                      secondary={(patientAssessment.priorityInfo?.priority_score || 
+                                 patientAssessment.priority_score || 0).toFixed(2)} 
                     />
                   </ListItem>
                   <ListItem>
                     <ListItemText 
                       primary="Check-in Time" 
-                      secondary={moment(patientAssessment.checkInTime).format('MMM D, YYYY hh:mm A')} 
+                      secondary={moment(patientAssessment.checkInTime || patientAssessment.check_in_time || new Date()).format('MMM D, YYYY hh:mm A')} 
                     />
                   </ListItem>
                 </List>
@@ -315,7 +335,15 @@ function QueueStatusPage() {
                 </Typography>
               </Box>
               
-              <Box sx={{ mt: 3, textAlign: 'center' }}>
+              <Box sx={{ mt: 3, textAlign: 'center', display: 'flex', gap: 2, justifyContent: 'center' }}>
+                <Button 
+                  variant="outlined"
+                  startIcon={<RefreshIcon />}
+                  onClick={handleRefresh}
+                  disabled={loading}
+                >
+                  Refresh Status
+                </Button>
                 <Button 
                   variant="contained" 
                   color="primary"
@@ -335,21 +363,31 @@ function QueueStatusPage() {
             
             <Card>
               <CardContent>
-                <Typography variant="h6" gutterBottom>
-                  Current Queue
-                </Typography>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6">
+                    Current Queue ({queue.length} patients)
+                  </Typography>
+                  <Button 
+                    size="small" 
+                    startIcon={<RefreshIcon />}
+                    onClick={handleRefresh}
+                    disabled={loading}
+                  >
+                    Refresh
+                  </Button>
+                </Box>
                 
                 {queue.length > 0 ? (
                   queue.slice(0, 5).map((patient, index) => (
                     <PatientQueueItem 
-                      key={patient.patientId} 
+                      key={patient.patientId || patient.id || index} 
                       patient={patient} 
                       position={index + 1} 
                     />
                   ))
                 ) : (
                   <Typography color="text.secondary" align="center" sx={{ py: 2 }}>
-                    No other patients in queue
+                    {loading ? 'Loading queue...' : 'No patients in queue'}
                   </Typography>
                 )}
                 
@@ -373,5 +411,3 @@ function QueueStatusPage() {
 }
 
 export default QueueStatusPage;
-
-

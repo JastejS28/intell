@@ -1,120 +1,100 @@
-// import axios from 'axios';
-
-// // Create an axios instance
-// const api = axios.create({
-//   baseURL: '/api'
-// });
-
-// // API functions for interacting with the backend
-// export const apiService = {
-//   // Submit patient vitals and get priority assignment
-//   submitVitals: async (patientData) => {
-//     try {
-//       const response = await api.post('/patients/vitals', patientData);
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error submitting vitals:', error);
-//       throw error;
-//     }
-//   },
-  
-//   // Get the current queue of patients
-//   getQueue: async () => {
-//     try {
-//       const response = await api.get('/queue');
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error fetching queue:', error);
-//       throw error;
-//     }
-//   },
-  
-//   // Get queue statistics
-//   getQueueStats: async () => {
-//     try {
-//       const response = await api.get('/queue/stats');
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error fetching queue stats:', error);
-//       throw error;
-//     }
-//   },
-  
-//   // Get the next patient to be seen
-//   getNextPatient: async () => {
-//     try {
-//       const response = await api.get('/queue/next');
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error fetching next patient:', error);
-//       throw error;
-//     }
-//   },
-  
-//   // Remove a patient from the queue
-//   removeFromQueue: async (patientId) => {
-//     try {
-//       const response = await api.delete(`/queue/${patientId}`);
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error removing patient from queue:', error);
-//       throw error;
-//     }
-//   },
-  
-//   // Clear the entire queue
-//   clearQueue: async () => {
-//     try {
-//       const response = await api.delete('/queue');
-//       return response.data;
-//     } catch (error) {
-//       console.error('Error clearing queue:', error);
-//       throw error;
-//     }
-//   },
-// };
-
-// export default apiService;
 import axios from 'axios';
 
 const api = axios.create({
-  baseURL: '/api'
+  baseURL: '/api',
+  timeout: 10000 // 10 second timeout
 });
+
+// Add request interceptor for debugging
+api.interceptors.request.use(request => {
+  console.log('API Request:', request.method?.toUpperCase(), request.url, request.data);
+  return request;
+});
+
+// Add response interceptor for debugging
+api.interceptors.response.use(
+  response => {
+    console.log('API Response:', response.status, response.data);
+    return response;
+  },
+  error => {
+    console.error('API Error:', error.response?.status, error.response?.data || error.message);
+    return Promise.reject(error);
+  }
+);
 
 const apiService = {
   // Patient endpoints
   submitPatientInfo: (data) => api.post('/patients', data),
-  submitVitals: (data) => api.post('/patients/vitals', data),
+  
+  submitVitals: async (data) => {
+    try {
+      console.log('Submitting vitals:', data);
+      const response = await api.post('/patients/vitals', data);
+      return response;
+    } catch (error) {
+      console.error('Error submitting vitals:', error);
+      throw error;
+    }
+  },
   
   // Queue endpoints
   getQueue: async () => {
     try {
+      console.log('Fetching queue...');
       const response = await api.get('/queue');
-      return response.data;
+      console.log('Queue response:', response.data);
+      
+      // Ensure we return the expected format
+      if (response.data && response.data.success) {
+        return {
+          data: response.data.data || [],
+          count: response.data.count || 0
+        };
+      }
+      
+      // Fallback format
+      return {
+        data: Array.isArray(response.data) ? response.data : [],
+        count: Array.isArray(response.data) ? response.data.length : 0
+      };
     } catch (error) {
       console.error("Error fetching queue:", error);
-      return { data: [] }; // Return empty data instead of throwing
+      // Return empty data instead of throwing
+      return { 
+        data: [],
+        count: 0,
+        error: error.message
+      };
     }
   },
   
-  // Updated to match actual server endpoint - removed /stats
+  // Calculate stats from queue data since /stats endpoint doesn't exist
   getQueueStats: async () => {
     try {
-      // Just use the regular queue endpoint since /stats doesn't exist
-      const response = await api.get('/queue');
-      const queueData = response.data || [];
+      const queueResponse = await apiService.getQueue();
+      const queueData = queueResponse.data || [];
+      
+      console.log('Calculating stats from queue data:', queueData);
       
       // Calculate stats from the queue data
       const stats = {
         totalPatients: queueData.length,
-        highPriority: queueData.filter(p => 
-          (p.risk_level || p.priorityInfo?.risk_level) === 'High').length,
-        mediumPriority: queueData.filter(p => 
-          (p.risk_level || p.priorityInfo?.risk_level) === 'Medium').length,
-        lowPriority: queueData.filter(p => 
-          (p.risk_level || p.priorityInfo?.risk_level) === 'Low').length
+        highPriority: queueData.filter(p => {
+          const riskLevel = (p.risk_level || p.priorityInfo?.risk_level || '').toLowerCase();
+          return riskLevel === 'high' || riskLevel === 'high risk';
+        }).length,
+        mediumPriority: queueData.filter(p => {
+          const riskLevel = (p.risk_level || p.priorityInfo?.risk_level || '').toLowerCase();
+          return riskLevel === 'medium' || riskLevel === 'medium risk';
+        }).length,
+        lowPriority: queueData.filter(p => {
+          const riskLevel = (p.risk_level || p.priorityInfo?.risk_level || '').toLowerCase();
+          return riskLevel === 'low' || riskLevel === 'low risk';
+        }).length
       };
       
+      console.log('Calculated stats:', stats);
       return stats;
     } catch (error) {
       console.error("Error calculating queue stats:", error);
@@ -127,8 +107,41 @@ const apiService = {
     }
   },
   
+  // Remove patient from queue
+  removeFromQueue: async (patientId) => {
+    try {
+      console.log('Removing patient from queue:', patientId);
+      const response = await api.delete(`/queue/${patientId}`);
+      return response.data;
+    } catch (error) {
+      console.error('Error removing patient:', error);
+      throw error;
+    }
+  },
+  
+  // Clear entire queue
+  clearQueue: async () => {
+    try {
+      console.log('Clearing entire queue...');
+      const response = await api.delete('/queue');
+      return response.data;
+    } catch (error) {
+      console.error('Error clearing queue:', error);
+      throw error;
+    }
+  },
+  
   // Admin endpoint for calling next patient
-  callNextPatient: () => api.delete('/queue/next')
+  callNextPatient: async () => {
+    try {
+      console.log('Calling next patient...');
+      const response = await api.delete('/queue/next');
+      return response.data;
+    } catch (error) {
+      console.error('Error calling next patient:', error);
+      throw error;
+    }
+  }
 };
 
 export default apiService;
