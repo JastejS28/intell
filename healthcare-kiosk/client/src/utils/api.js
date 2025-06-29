@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 10000 // 10 second timeout
+  timeout: 15000 // 15 second timeout for external API calls
 });
 
 // Add request interceptor for debugging
@@ -139,7 +139,34 @@ const apiService = {
       return response.data;
     } catch (error) {
       console.error('Error calling next patient:', error);
+      
+      // Handle specific error cases
+      if (error.response && error.response.status === 404) {
+        // No patients in queue
+        return {
+          success: true,
+          nextPatient: null,
+          updatedQueue: [],
+          message: 'No patients in queue',
+          removedCount: 0
+        };
+      }
+      
       throw error;
+    }
+  },
+  
+  // Health check endpoint
+  checkHealth: async () => {
+    try {
+      const response = await api.get('/health');
+      return response.data;
+    } catch (error) {
+      console.error('Health check failed:', error);
+      return {
+        status: 'error',
+        error: error.message
+      };
     }
   }
 };
