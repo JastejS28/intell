@@ -11,7 +11,7 @@ let patientsQueue = [];
 let patientNameMap = new Map();
 
 const PORT = process.env.PORT || 5000;
-const QUEUE_ASSIGNER_API = process.env.QUEUE_ASSIGNER_API;
+const QUEUE_ASSIGNER_API = process.env.QUEUE_ASSIGNER_API || 'https://queue-assigner.onrender.com';
 
 // Initialize express app
 const app = express();
@@ -31,15 +31,33 @@ const getRefreshedQueue = async () => {
   try {
     console.log('Fetching queue from external API...');
     const response = await axios.get(`${QUEUE_ASSIGNER_API}/queue/`, {
-      timeout: 5000
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
     });
+    
+    console.log('External API response status:', response.status);
+    console.log('External API response data:', JSON.stringify(response.data, null, 2));
+    
     const externalQueue = response.data;
     
-    console.log('External queue data:', externalQueue);
+    // Handle different response formats
+    let queueArray = [];
+    if (Array.isArray(externalQueue)) {
+      queueArray = externalQueue;
+    } else if (externalQueue && Array.isArray(externalQueue.data)) {
+      queueArray = externalQueue.data;
+    } else if (externalQueue && typeof externalQueue === 'object') {
+      // If it's a single object, wrap it in an array
+      queueArray = [externalQueue];
+    }
+    
+    console.log('Processed queue array:', queueArray);
     
     // The external API is the source of truth. We just add names back.
-    const refreshedQueue = externalQueue.map(patient => {
-      const patientId = patient.id || '';
+    const refreshedQueue = queueArray.map((patient, index) => {
+      const patientId = patient.id || patient.patient_id || `patient_${index}`;
       return {
         ...patient,
         patientId: patientId, // Add patientId for frontend compatibility
@@ -47,7 +65,7 @@ const getRefreshedQueue = async () => {
         // Ensure all required fields are present
         risk_level: patient.risk_level || 'Unknown',
         priority_score: patient.priority_score || 0,
-        queue_position: patient.queue_position || 0,
+        queue_position: patient.queue_position || (index + 1),
         estimated_wait_time: patient.estimated_wait_time || 0,
         check_in_time: patient.check_in_time || new Date().toISOString(),
         // Add priorityInfo for client compatibility
@@ -64,6 +82,9 @@ const getRefreshedQueue = async () => {
     return refreshedQueue;
   } catch (error) {
     console.error("Error fetching external queue:", error.message);
+    if (error.response) {
+      console.error("External API error response:", error.response.status, error.response.data);
+    }
     console.log(`Returning cached queue with ${patientsQueue.length} patients`);
     return patientsQueue; // Return cached data if external API fails
   }
@@ -77,60 +98,103 @@ app.post('/api/patients/vitals', async (req, res) => {
     const externalPatientId = `${patientData.name.toLowerCase().replace(/\s+/g, '_')}_${timestamp}`;
 
     console.log('Processing patient:', patientData.name);
+    console.log('Patient data received:', JSON.stringify(patientData, null, 2));
     
     // Store the name for this ID
     patientNameMap.set(externalPatientId, patientData.name);
 
-    // Prepare data for external API
-    const patientForQueueUpdate = {
-      id: externalPatientId,
-      check_in_time: new Date().toISOString(),
-      vital_signs: {
-        heart_rate: parseFloat(patientData.heartRate),
-        respiratory_rate: parseFloat(patientData.respiratoryRate),
-        body_temperature: parseFloat(patientData.bodyTemperature),
-        oxygen_saturation: parseInt(patientData.oxygenSaturation),
-        systolic_bp: parseInt(patientData.systolicBP),
-        diastolic_bp: parseInt(patientData.diastolicBP)
-      },
-      demographics: {
-        age: parseFloat(patientData.age),
-        gender: parseInt(patientData.gender),
-        weight_kg: parseFloat(patientData.weight),
-        height_m: parseFloat(patientData.height)
-      }
+    // Prepare data for external API according to the API documentation
+    const patientForAPI = {
+      Heart_Rate: parseFloat(patientData.heartRate),
+      Respiratory_Rate: parseFloat(patientData.respiratoryRate),
+      Body_Temperature: parseFloat(patientData.bodyTemperature),
+      Oxygen_Saturation: parseInt(patientData.oxygenSaturation),
+      Systolic_Blood_Pressure: parseInt(patientData.systolicBP),
+      Diastolic_Blood_Pressure: parseInt(patientData.diastolicBP),
+      Age: parseFloat(patientData.age),
+      Gender: parseInt(patientData.gender),
+      Weight_kg: parseFloat(patientData.weight),
+      Height_m: parseFloat(patientData.height),
+      // Calculate derived values
+      Derived_HRV: Math.max(20, 60 - (parseFloat(patientData.age) * 0.5)), // Simple HRV calculation
+      Derived_Pulse_Pressure: parseInt(patientData.systolicBP) - parseInt(patientData.diastolicBP),
+      Derived_BMI: parseFloat(patientData.weight) / (parseFloat(patientData.height) * parseFloat(patientData.height)),
+      Derived_MAP: (parseInt(patientData.systolicBP) + 2 * parseInt(patientData.diastolicBP)) / 3
     };
 
-    console.log('Sending patient data to external API:', JSON.stringify(patientForQueueUpdate, null, 2));
+    console.log('Sending patient data to external API:', JSON.stringify(patientForAPI, null, 2));
     
     let newPatientDetails = null;
     let useExternalAPI = true;
     
     try {
-      // Add patient to external queue
-      await axios.post(`${QUEUE_ASSIGNER_API}/queue/update-priorities/`, [patientForQueueUpdate], {
-        timeout: 10000
+      // Send to external API for risk prediction
+      const predictionResponse = await axios.post(`${QUEUE_ASSIGNER_API}/predict/`, patientForAPI, {
+        timeout: 15000,
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
       
-      // Wait a moment for the external API to process
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log('External API prediction response:', JSON.stringify(predictionResponse.data, null, 2));
       
-      // Fetch the updated queue from the source of truth
-      const updatedQueue = await getRefreshedQueue();
-      newPatientDetails = updatedQueue.find(p => p.id === externalPatientId);
+      const prediction = predictionResponse.data;
       
-      if (!newPatientDetails) {
-        console.warn('Patient not found in external queue after adding');
-        useExternalAPI = false;
-      } else {
-        console.log('Patient successfully added to external queue:', newPatientDetails);
-      }
+      // Create patient object with prediction results
+      newPatientDetails = {
+        id: externalPatientId,
+        patientId: externalPatientId,
+        name: patientData.name,
+        risk_level: prediction.risk_level || 'Unknown',
+        priority_score: prediction.priority_score || 0,
+        confidence_score: prediction.confidence_score || 0,
+        queue_position: 1, // Will be updated when we get the full queue
+        estimated_wait_time: prediction.estimated_wait_time || 30,
+        check_in_time: new Date().toISOString(),
+        vital_signs: {
+          heart_rate: parseFloat(patientData.heartRate),
+          respiratory_rate: parseFloat(patientData.respiratoryRate),
+          body_temperature: parseFloat(patientData.bodyTemperature),
+          oxygen_saturation: parseInt(patientData.oxygenSaturation),
+          systolic_bp: parseInt(patientData.systolicBP),
+          diastolic_bp: parseInt(patientData.diastolicBP)
+        },
+        demographics: {
+          age: parseFloat(patientData.age),
+          gender: parseInt(patientData.gender),
+          weight_kg: parseFloat(patientData.weight),
+          height_m: parseFloat(patientData.height)
+        },
+        priorityInfo: {
+          risk_level: prediction.risk_level || 'Unknown',
+          priority_score: prediction.priority_score || 0,
+          estimated_wait_time: prediction.estimated_wait_time || 30
+        }
+      };
+      
+      // Add to local queue
+      patientsQueue.push(newPatientDetails);
+      
+      // Sort queue by priority score (highest first)
+      patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+      
+      // Update queue positions
+      patientsQueue.forEach((patient, index) => {
+        patient.queue_position = index + 1;
+        patient.queuePosition = index + 1;
+      });
+      
+      console.log('Patient successfully processed with external API');
+      
     } catch (externalError) {
       console.error('External API failed:', externalError.message);
+      if (externalError.response) {
+        console.error('External API error details:', externalError.response.status, externalError.response.data);
+      }
       useExternalAPI = false;
     }
 
-    // If external API failed or patient not found, create fallback response
+    // If external API failed, create fallback response
     if (!useExternalAPI || !newPatientDetails) {
       console.log('Using fallback patient data');
       
@@ -159,11 +223,24 @@ app.post('/api/patients/vitals', async (req, res) => {
         name: patientData.name,
         risk_level: riskLevel,
         priority_score: priorityScore,
+        confidence_score: 0.8,
         queue_position: patientsQueue.length + 1,
         estimated_wait_time: riskLevel === 'High' ? 15 : riskLevel === 'Medium' ? 30 : 45,
         check_in_time: new Date().toISOString(),
-        vital_signs: patientForQueueUpdate.vital_signs,
-        demographics: patientForQueueUpdate.demographics,
+        vital_signs: {
+          heart_rate: parseFloat(patientData.heartRate),
+          respiratory_rate: parseFloat(patientData.respiratoryRate),
+          body_temperature: parseFloat(patientData.bodyTemperature),
+          oxygen_saturation: parseInt(patientData.oxygenSaturation),
+          systolic_bp: parseInt(patientData.systolicBP),
+          diastolic_bp: parseInt(patientData.diastolicBP)
+        },
+        demographics: {
+          age: parseFloat(patientData.age),
+          gender: parseInt(patientData.gender),
+          weight_kg: parseFloat(patientData.weight),
+          height_m: parseFloat(patientData.height)
+        },
         priorityInfo: {
           risk_level: riskLevel,
           priority_score: priorityScore,
@@ -183,7 +260,7 @@ app.post('/api/patients/vitals', async (req, res) => {
         patient.queuePosition = index + 1;
       });
       
-      console.log('Patient added to local queue. Total patients:', patientsQueue.length);
+      console.log('Patient added to local queue with fallback data. Total patients:', patientsQueue.length);
     }
 
     // Prepare response with all necessary fields
@@ -200,7 +277,7 @@ app.post('/api/patients/vitals', async (req, res) => {
       }
     };
 
-    console.log('Sending response to client:', responseData);
+    console.log('Sending response to client:', JSON.stringify(responseData, null, 2));
 
     res.status(200).json({
       success: true,
@@ -210,6 +287,7 @@ app.post('/api/patients/vitals', async (req, res) => {
 
   } catch (error) {
     console.error('Error submitting vitals:', error.message);
+    console.error('Error stack:', error.stack);
     
     // Provide fallback response even on error
     const timestamp = Date.now();
@@ -221,6 +299,7 @@ app.post('/api/patients/vitals', async (req, res) => {
       name: req.body.name || 'Unknown Patient',
       risk_level: 'Medium',
       priority_score: 50,
+      confidence_score: 0.5,
       queue_position: patientsQueue.length + 1,
       estimated_wait_time: 30,
       check_in_time: new Date().toISOString(),
@@ -264,16 +343,11 @@ app.get('/api/queue', async (req, res) => {
   try {
     console.log('Queue endpoint called');
     
-    // Try to refresh from external API first
-    let queue = await getRefreshedQueue();
-    
-    // If external API returned empty but we have local data, use local data
-    if (queue.length === 0 && patientsQueue.length > 0) {
-      console.log('External API returned empty, using local queue');
-      queue = patientsQueue;
-    }
+    // Always return local queue since we're managing it ourselves
+    let queue = patientsQueue;
     
     console.log(`Returning queue with ${queue.length} patients`);
+    console.log('Queue data:', JSON.stringify(queue, null, 2));
     
     res.status(200).json({
       success: true,
@@ -282,12 +356,11 @@ app.get('/api/queue', async (req, res) => {
     });
   } catch (error) {
     console.error('Error getting queue:', error.message);
-    // Return cached data if available
-    console.log(`Returning cached queue with ${patientsQueue.length} patients`);
+    // Return empty queue on error
     res.status(200).json({
       success: true,
-      count: patientsQueue.length,
-      data: patientsQueue
+      count: 0,
+      data: []
     });
   }
 });
@@ -297,16 +370,6 @@ app.delete('/api/queue/:patientId', async (req, res) => {
   try {
     const { patientId } = req.params;
     console.log(`Removing patient ${patientId} from queue...`);
-    
-    // Remove from external API if possible
-    try {
-      await axios.delete(`${QUEUE_ASSIGNER_API}/queue/${patientId}/`, {
-        timeout: 5000
-      });
-      console.log('Patient removed from external API');
-    } catch (externalError) {
-      console.warn('Could not remove from external API:', externalError.message);
-    }
     
     // Remove from local queue
     const initialLength = patientsQueue.length;
@@ -322,13 +385,10 @@ app.delete('/api/queue/:patientId', async (req, res) => {
       patient.queuePosition = index + 1;
     });
     
-    // Refresh queue
-    const queue = await getRefreshedQueue();
-    
     res.status(200).json({
       success: true,
       message: 'Patient removed from queue',
-      updatedQueue: queue
+      updatedQueue: patientsQueue
     });
   } catch (error) {
     console.error('Error removing patient:', error.message);
@@ -343,29 +403,19 @@ app.delete('/api/queue/next', async (req, res) => {
     
     let nextPatient = null;
     
-    try {
-      const response = await axios.delete(`${QUEUE_ASSIGNER_API}/queue/next/`, {
-        timeout: 5000
+    if (patientsQueue.length > 0) {
+      // Sort by priority score first
+      patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+      nextPatient = patientsQueue[0];
+      patientsQueue = patientsQueue.slice(1);
+      
+      // Update queue positions
+      patientsQueue.forEach((patient, index) => {
+        patient.queue_position = index + 1;
+        patient.queuePosition = index + 1;
       });
-      nextPatient = response.data;
-      console.log('Next patient from external API:', nextPatient);
-    } catch (externalError) {
-      console.warn('External API call failed, using local queue:', externalError.message);
-      // Fallback to local queue
-      if (patientsQueue.length > 0) {
-        // Sort by priority score first
-        patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
-        nextPatient = patientsQueue[0];
-        patientsQueue = patientsQueue.slice(1);
-        
-        // Update queue positions
-        patientsQueue.forEach((patient, index) => {
-          patient.queue_position = index + 1;
-          patient.queuePosition = index + 1;
-        });
-        
-        console.log('Next patient from local queue:', nextPatient);
-      }
+      
+      console.log('Next patient from local queue:', nextPatient);
     }
 
     // Remove the patient's name from our map
@@ -373,13 +423,10 @@ app.delete('/api/queue/next', async (req, res) => {
       patientNameMap.delete(nextPatient.id);
     }
 
-    // Refresh the queue from the source of truth
-    const queue = await getRefreshedQueue();
-
     res.status(200).json({
       success: true,
       nextPatient: nextPatient,
-      updatedQueue: queue
+      updatedQueue: patientsQueue
     });
   } catch (error) {
     console.error('Error calling next patient:', error.message);
@@ -391,16 +438,6 @@ app.delete('/api/queue/next', async (req, res) => {
 app.delete('/api/queue', async (req, res) => {
   try {
     console.log('Clearing entire queue...');
-    
-    // Clear external queue if possible
-    try {
-      await axios.delete(`${QUEUE_ASSIGNER_API}/queue/clear/`, {
-        timeout: 5000
-      });
-      console.log('External queue cleared');
-    } catch (externalError) {
-      console.warn('Could not clear external queue:', externalError.message);
-    }
     
     // Clear local data
     const patientCount = patientsQueue.length;
@@ -419,24 +456,19 @@ app.delete('/api/queue', async (req, res) => {
   }
 });
 
-// Add regular polling to update queue priorities every 30 seconds
-setInterval(async () => {
-  try {
-    if (patientsQueue.length > 0) {
-      console.log('Periodic queue refresh...');
-      await getRefreshedQueue();
-    }
-  } catch (error) {
-    console.error('Error in periodic queue refresh:', error.message);
-  }
-}, 30 * 1000); // Every 30 seconds
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    queueLength: patientsQueue.length,
+    externalAPI: QUEUE_ASSIGNER_API
+  });
+});
 
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`External API: ${QUEUE_ASSIGNER_API}`);
-  // Fetch initial queue state on startup
-  getRefreshedQueue().catch(err => {
-    console.warn('Initial queue fetch failed:', err.message);
-  });
+  console.log('Server ready to accept requests');
 });
