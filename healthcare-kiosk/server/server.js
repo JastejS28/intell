@@ -6,6 +6,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // In-memory storage for patients in the queue
 let patientsQueue = [];
+let patientCounter = 1;
 
 const PORT = process.env.PORT || 5000;
 
@@ -17,179 +18,281 @@ app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
+// Helper function to calculate risk level
+function calculateRiskLevel(vitals) {
+  let riskScore = 0;
+  let riskLevel = 'Low';
+  
+  // Heart rate scoring
+  if (vitals.heartRate > 120 || vitals.heartRate < 50) {
+    riskScore += 30;
+  } else if (vitals.heartRate > 100 || vitals.heartRate < 60) {
+    riskScore += 15;
+  }
+  
+  // Blood pressure scoring
+  if (vitals.systolicBP > 180 || vitals.systolicBP < 90) {
+    riskScore += 35;
+  } else if (vitals.systolicBP > 140 || vitals.systolicBP < 100) {
+    riskScore += 20;
+  }
+  
+  // Oxygen saturation scoring
+  if (vitals.oxygenSaturation < 90) {
+    riskScore += 40;
+  } else if (vitals.oxygenSaturation < 95) {
+    riskScore += 20;
+  }
+  
+  // Temperature scoring
+  if (vitals.bodyTemperature > 39 || vitals.bodyTemperature < 35) {
+    riskScore += 25;
+  } else if (vitals.bodyTemperature > 38 || vitals.bodyTemperature < 36) {
+    riskScore += 10;
+  }
+  
+  // Respiratory rate scoring
+  if (vitals.respiratoryRate > 25 || vitals.respiratoryRate < 12) {
+    riskScore += 20;
+  } else if (vitals.respiratoryRate > 20 || vitals.respiratoryRate < 14) {
+    riskScore += 10;
+  }
+  
+  // Age factor
+  if (vitals.age > 75) {
+    riskScore += 15;
+  } else if (vitals.age > 65) {
+    riskScore += 10;
+  }
+  
+  // Determine risk level
+  if (riskScore >= 60) {
+    riskLevel = 'High';
+  } else if (riskScore >= 30) {
+    riskLevel = 'Medium';
+  } else {
+    riskLevel = 'Low';
+  }
+  
+  return { riskLevel, riskScore };
+}
+
+// Helper function to calculate priority score
+function calculatePriorityScore(riskLevel, riskScore, age) {
+  let priorityScore = 0;
+  
+  // Base priority by risk level
+  switch (riskLevel) {
+    case 'High':
+      priorityScore = 80 + riskScore;
+      break;
+    case 'Medium':
+      priorityScore = 40 + riskScore;
+      break;
+    case 'Low':
+      priorityScore = 10 + riskScore;
+      break;
+  }
+  
+  // Age adjustment
+  if (age > 75) {
+    priorityScore += 10;
+  } else if (age > 65) {
+    priorityScore += 5;
+  }
+  
+  return Math.min(priorityScore, 100); // Cap at 100
+}
+
+// Helper function to calculate estimated wait time
+function calculateWaitTime(position, riskLevel) {
+  const baseTimePerPatient = {
+    'High': 15,
+    'Medium': 20,
+    'Low': 25
+  };
+  
+  const baseTime = baseTimePerPatient[riskLevel] || 20;
+  return Math.max(0, (position - 1) * baseTime);
+}
+
 // Root route
 app.get('/', (req, res) => {
-  res.send('Healthcare Kiosk API is running');
+  res.json({
+    message: 'Healthcare Kiosk API is running',
+    timestamp: new Date().toISOString(),
+    queueLength: patientsQueue.length
+  });
 });
 
 // Submit patient vitals and get priority
-app.post('/api/patients/vitals', async (req, res) => {
+app.post('/api/patients/vitals', (req, res) => {
   try {
-    const patientData = { ...req.body };
-    const timestamp = new Date().getTime();
-    const patientId = `${patientData.name.toLowerCase().replace(/\s+/g, '_')}_${timestamp}`;
-
-    console.log('=== PROCESSING NEW PATIENT ===');
-    console.log('Patient Name:', patientData.name);
-    console.log('Patient ID:', patientId);
-    console.log('Received Data:', JSON.stringify(patientData, null, 2));
+    console.log('\n=== PROCESSING NEW PATIENT ===');
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
     
-    // Determine risk level based on vital signs
-    let riskLevel = 'Low';
-    let priorityScore = 30;
-    let estimatedWaitTime = 45;
+    const patientData = req.body;
+    const timestamp = new Date();
+    const patientId = `patient_${patientCounter++}_${timestamp.getTime()}`;
     
-    // High risk conditions - any critical vital sign
-    if (patientData.heartRate > 120 || patientData.heartRate < 50 ||
-        patientData.systolicBP > 180 || patientData.systolicBP < 90 ||
-        patientData.oxygenSaturation < 90 || 
-        patientData.bodyTemperature > 39 || patientData.bodyTemperature < 35 ||
-        patientData.respiratoryRate > 25 || patientData.respiratoryRate < 12) {
-      riskLevel = 'High';
-      priorityScore = 90 + Math.random() * 10; // 90-100
-      estimatedWaitTime = 5;
-    }
-    // Medium risk conditions
-    else if (patientData.heartRate > 100 || patientData.heartRate < 60 ||
-             patientData.systolicBP > 140 || patientData.systolicBP < 100 ||
-             patientData.oxygenSaturation < 95 || 
-             patientData.bodyTemperature > 38 || patientData.bodyTemperature < 36 ||
-             patientData.age > 65) {
-      riskLevel = 'Medium';
-      priorityScore = 50 + Math.random() * 20; // 50-70
-      estimatedWaitTime = 20;
-    }
+    // Calculate risk assessment
+    const { riskLevel, riskScore } = calculateRiskLevel(patientData);
+    const priorityScore = calculatePriorityScore(riskLevel, riskScore, patientData.age);
     
-    console.log('Risk Assessment:', { riskLevel, priorityScore, estimatedWaitTime });
+    console.log('Risk Assessment:', { riskLevel, riskScore, priorityScore });
     
-    // Create patient object with all necessary fields
+    // Create comprehensive patient object
     const newPatient = {
+      // Basic identifiers
       id: patientId,
       patientId: patientId,
-      name: patientData.name,
+      name: patientData.name || `Patient ${patientCounter - 1}`,
+      
+      // Risk and priority
       risk_level: riskLevel,
       priority_score: priorityScore,
       confidence_score: 0.85,
-      queue_position: 1, // Will be updated when we sort
+      
+      // Queue information (will be updated after sorting)
+      queue_position: 1,
       queuePosition: 1,
-      estimated_wait_time: estimatedWaitTime,
-      check_in_time: new Date().toISOString(),
-      checkInTime: new Date().toISOString(),
+      estimated_wait_time: 0,
+      
+      // Timestamps
+      check_in_time: timestamp.toISOString(),
+      checkInTime: timestamp.toISOString(),
+      timestamp: timestamp.toISOString(),
+      
+      // Vital signs
       vital_signs: {
-        heart_rate: parseFloat(patientData.heartRate),
-        respiratory_rate: parseFloat(patientData.respiratoryRate),
+        heart_rate: parseInt(patientData.heartRate),
+        respiratory_rate: parseInt(patientData.respiratoryRate),
         body_temperature: parseFloat(patientData.bodyTemperature),
         oxygen_saturation: parseInt(patientData.oxygenSaturation),
         systolic_bp: parseInt(patientData.systolicBP),
         diastolic_bp: parseInt(patientData.diastolicBP)
       },
+      
+      // Demographics
       demographics: {
-        age: parseFloat(patientData.age),
+        age: parseInt(patientData.age),
         gender: parseInt(patientData.gender),
         weight_kg: parseFloat(patientData.weight),
         height_m: parseFloat(patientData.height)
       },
+      
+      // Priority info for compatibility
       priorityInfo: {
         risk_level: riskLevel,
         priority_score: priorityScore,
-        estimated_wait_time: estimatedWaitTime,
+        estimated_wait_time: 0,
         queue_position: 1
       }
     };
     
-    console.log('Created Patient Object:', JSON.stringify(newPatient, null, 2));
+    console.log('Created patient object:', {
+      id: newPatient.id,
+      name: newPatient.name,
+      risk: newPatient.risk_level,
+      priority: newPatient.priority_score
+    });
     
-    // Add to local queue
+    // Add to queue
     patientsQueue.push(newPatient);
-    console.log('Added to queue. Total patients:', patientsQueue.length);
+    console.log(`Added to queue. Total patients: ${patientsQueue.length}`);
     
     // Sort queue by priority score (highest first)
-    patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+    patientsQueue.sort((a, b) => b.priority_score - a.priority_score);
     console.log('Queue sorted by priority');
     
     // Update queue positions and wait times
     patientsQueue.forEach((patient, index) => {
-      patient.queue_position = index + 1;
-      patient.queuePosition = index + 1;
-      patient.priorityInfo.queue_position = index + 1;
+      const position = index + 1;
+      const waitTime = calculateWaitTime(position, patient.risk_level);
       
-      // Calculate cumulative wait time
-      let cumulativeWait = 0;
-      for (let i = 0; i < index; i++) {
-        const prevPatient = patientsQueue[i];
-        const baseTime = prevPatient.risk_level === 'High' ? 15 : 
-                        prevPatient.risk_level === 'Medium' ? 20 : 25;
-        cumulativeWait += baseTime;
+      patient.queue_position = position;
+      patient.queuePosition = position;
+      patient.estimated_wait_time = waitTime;
+      
+      if (patient.priorityInfo) {
+        patient.priorityInfo.queue_position = position;
+        patient.priorityInfo.estimated_wait_time = waitTime;
       }
-      patient.estimated_wait_time = cumulativeWait;
-      patient.priorityInfo.estimated_wait_time = cumulativeWait;
     });
     
     console.log('Updated queue positions and wait times');
-    console.log('Final Queue State:', patientsQueue.map(p => ({
+    console.log('Final queue state:', patientsQueue.map(p => ({
       name: p.name,
       position: p.queue_position,
       risk: p.risk_level,
-      priority: p.priority_score,
+      priority: p.priority_score.toFixed(1),
       wait: p.estimated_wait_time
     })));
     
-    // Find the newly added patient in the sorted queue
+    // Find the newly added patient
     const addedPatient = patientsQueue.find(p => p.id === patientId);
     
-    // Prepare response
-    const responseData = {
-      ...patientData,
-      ...addedPatient,
-      success: true
-    };
-
-    console.log('Sending Response:', JSON.stringify(responseData, null, 2));
+    if (!addedPatient) {
+      throw new Error('Patient not found after adding to queue');
+    }
+    
+    console.log('Patient successfully added at position:', addedPatient.queue_position);
     console.log('=== PATIENT PROCESSING COMPLETE ===\n');
-
+    
+    // Return the patient data
     res.status(200).json({
       success: true,
-      data: responseData,
-      message: 'Patient added successfully to queue'
+      data: addedPatient,
+      message: `Patient added to queue at position ${addedPatient.queue_position}`
     });
-
+    
   } catch (error) {
     console.error('=== ERROR PROCESSING PATIENT ===');
     console.error('Error:', error.message);
     console.error('Stack:', error.stack);
     
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Error processing patient data',
-      error: error.message 
+      error: error.message
     });
   }
 });
 
 // Get all patients in the queue
-app.get('/api/queue', async (req, res) => {
+app.get('/api/queue', (req, res) => {
   try {
-    console.log('=== QUEUE REQUEST ===');
-    console.log(`Queue length: ${patientsQueue.length}`);
+    console.log('\n=== QUEUE REQUEST ===');
+    console.log(`Current queue length: ${patientsQueue.length}`);
+    
+    if (patientsQueue.length === 0) {
+      console.log('Queue is empty');
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        data: []
+      });
+    }
     
     // Sort queue by priority before returning
-    patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+    patientsQueue.sort((a, b) => b.priority_score - a.priority_score);
     
-    // Update positions
+    // Update positions (in case they got out of sync)
     patientsQueue.forEach((patient, index) => {
-      patient.queue_position = index + 1;
-      patient.queuePosition = index + 1;
+      const position = index + 1;
+      patient.queue_position = position;
+      patient.queuePosition = position;
       if (patient.priorityInfo) {
-        patient.priorityInfo.queue_position = index + 1;
+        patient.priorityInfo.queue_position = position;
       }
     });
     
-    console.log('Returning queue data:', patientsQueue.map(p => ({
+    console.log('Returning queue data for patients:', patientsQueue.map(p => ({
       id: p.id,
       name: p.name,
       position: p.queue_position,
       risk: p.risk_level,
-      priority: p.priority_score
+      priority: p.priority_score.toFixed(1)
     })));
     
     res.status(200).json({
@@ -197,6 +300,7 @@ app.get('/api/queue', async (req, res) => {
       count: patientsQueue.length,
       data: patientsQueue
     });
+    
   } catch (error) {
     console.error('Error getting queue:', error.message);
     res.status(500).json({
@@ -209,10 +313,10 @@ app.get('/api/queue', async (req, res) => {
 });
 
 // Remove a patient from the queue
-app.delete('/api/queue/:patientId', async (req, res) => {
+app.delete('/api/queue/:patientId', (req, res) => {
   try {
     const { patientId } = req.params;
-    console.log(`=== REMOVING PATIENT ${patientId} ===`);
+    console.log(`\n=== REMOVING PATIENT ${patientId} ===`);
     
     const initialLength = patientsQueue.length;
     patientsQueue = patientsQueue.filter(p => p.id !== patientId && p.patientId !== patientId);
@@ -221,79 +325,113 @@ app.delete('/api/queue/:patientId', async (req, res) => {
     
     // Update queue positions
     patientsQueue.forEach((patient, index) => {
-      patient.queue_position = index + 1;
-      patient.queuePosition = index + 1;
+      const position = index + 1;
+      patient.queue_position = position;
+      patient.queuePosition = position;
       if (patient.priorityInfo) {
-        patient.priorityInfo.queue_position = index + 1;
+        patient.priorityInfo.queue_position = position;
       }
     });
     
     res.status(200).json({
       success: true,
       message: 'Patient removed from queue',
+      removedCount: initialLength - patientsQueue.length,
       updatedQueue: patientsQueue
     });
+    
   } catch (error) {
     console.error('Error removing patient:', error.message);
-    res.status(500).json({ success: false, message: 'Error removing patient from queue' });
+    res.status(500).json({
+      success: false,
+      message: 'Error removing patient from queue'
+    });
   }
 });
 
-// Call next patient
-app.delete('/api/queue/next', async (req, res) => {
+// Call next patient (remove highest priority patient)
+app.delete('/api/queue/next', (req, res) => {
   try {
-    console.log('=== CALLING NEXT PATIENT ===');
+    console.log('\n=== CALLING NEXT PATIENT ===');
     
-    let nextPatient = null;
-    
-    if (patientsQueue.length > 0) {
-      // Sort by priority score first
-      patientsQueue.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
-      nextPatient = patientsQueue[0];
-      patientsQueue = patientsQueue.slice(1);
-      
-      console.log('Next patient:', nextPatient.name, 'Risk:', nextPatient.risk_level);
-      
-      // Update queue positions
-      patientsQueue.forEach((patient, index) => {
-        patient.queue_position = index + 1;
-        patient.queuePosition = index + 1;
-        if (patient.priorityInfo) {
-          patient.priorityInfo.queue_position = index + 1;
-        }
-      });
-    } else {
+    if (patientsQueue.length === 0) {
       console.log('No patients in queue');
+      return res.status(200).json({
+        success: true,
+        message: 'No patients in queue',
+        nextPatient: null,
+        updatedQueue: []
+      });
     }
-
+    
+    // Sort by priority to ensure we get the highest priority patient
+    patientsQueue.sort((a, b) => b.priority_score - a.priority_score);
+    
+    // Remove the first (highest priority) patient
+    const nextPatient = patientsQueue.shift();
+    
+    console.log('Next patient called:', {
+      name: nextPatient.name,
+      risk: nextPatient.risk_level,
+      priority: nextPatient.priority_score.toFixed(1)
+    });
+    
+    // Update queue positions for remaining patients
+    patientsQueue.forEach((patient, index) => {
+      const position = index + 1;
+      const waitTime = calculateWaitTime(position, patient.risk_level);
+      
+      patient.queue_position = position;
+      patient.queuePosition = position;
+      patient.estimated_wait_time = waitTime;
+      
+      if (patient.priorityInfo) {
+        patient.priorityInfo.queue_position = position;
+        patient.priorityInfo.estimated_wait_time = waitTime;
+      }
+    });
+    
+    console.log(`Queue updated. Remaining patients: ${patientsQueue.length}`);
+    
     res.status(200).json({
       success: true,
       nextPatient: nextPatient,
-      updatedQueue: patientsQueue
+      updatedQueue: patientsQueue,
+      message: `Called ${nextPatient.name} (${nextPatient.risk_level} priority)`
     });
+    
   } catch (error) {
     console.error('Error calling next patient:', error.message);
-    res.status(500).json({ success: false, message: 'Error calling next patient' });
+    res.status(500).json({
+      success: false,
+      message: 'Error calling next patient'
+    });
   }
 });
 
 // Clear entire queue
-app.delete('/api/queue', async (req, res) => {
+app.delete('/api/queue', (req, res) => {
   try {
-    console.log('=== CLEARING QUEUE ===');
+    console.log('\n=== CLEARING QUEUE ===');
     
     const patientCount = patientsQueue.length;
     patientsQueue = [];
+    patientCounter = 1; // Reset counter
     
     console.log(`Cleared ${patientCount} patients from queue`);
     
     res.status(200).json({
       success: true,
-      message: `Cleared ${patientCount} patients from queue`
+      message: `Cleared ${patientCount} patients from queue`,
+      clearedCount: patientCount
     });
+    
   } catch (error) {
     console.error('Error clearing queue:', error.message);
-    res.status(500).json({ success: false, message: 'Error clearing queue' });
+    res.status(500).json({
+      success: false,
+      message: 'Error clearing queue'
+    });
   }
 });
 
@@ -303,11 +441,21 @@ app.get('/api/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     queueLength: patientsQueue.length,
-    patients: patientsQueue.map(p => ({ 
-      name: p.name, 
-      risk: p.risk_level, 
-      position: p.queue_position 
+    patients: patientsQueue.map(p => ({
+      name: p.name,
+      risk: p.risk_level,
+      position: p.queue_position,
+      priority: p.priority_score.toFixed(1)
     }))
+  });
+});
+
+// Debug endpoint to see raw queue data
+app.get('/api/debug/queue', (req, res) => {
+  res.status(200).json({
+    queueLength: patientsQueue.length,
+    patientCounter: patientCounter,
+    rawQueue: patientsQueue
   });
 });
 
@@ -315,5 +463,10 @@ app.get('/api/health', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Healthcare Kiosk Server running on port ${PORT}`);
   console.log('📋 Queue management system initialized');
-  console.log('🔗 API endpoints available at http://localhost:' + PORT + '/api/');
+  console.log('🔗 API endpoints available:');
+  console.log(`   - GET  http://localhost:${PORT}/api/queue`);
+  console.log(`   - POST http://localhost:${PORT}/api/patients/vitals`);
+  console.log(`   - GET  http://localhost:${PORT}/api/health`);
+  console.log(`   - GET  http://localhost:${PORT}/api/debug/queue`);
+  console.log('');
 });
